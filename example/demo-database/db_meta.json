@@ -1,7 +1,7 @@
 {
   "name": "demo-database",
-  "version": 1,
-  "baseline_time": "0001-01-01T00:00:00Z",
+  "version": 2,
+  "baseline_time": "2026-07-26T05:02:05.291383Z",
   "mode": "table",
   "github_repo": "DR1N0/github-database",
   "delta_branch": "ghdb-demo-database",
@@ -19,8 +19,7 @@
           "required": true
         },
         {
-          "name": "full_name",
-          "required": false
+          "name": "full_name"
         },
         {
           "name": "role",
