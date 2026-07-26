@@ -19,8 +19,7 @@
           "required": true
         },
         {
-          "name": "full_name",
-          "required": false
+          "name": "full_name"
         },
         {
           "name": "role",

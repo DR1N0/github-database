@@ -23,23 +23,30 @@ type DirEntry struct {
 }
 
 type httpClient struct {
-	repo  string // "owner/repo"
-	token string
-	host  string
-	hc    *http.Client
+	repo    string // "owner/repo"
+	token   string
+	baseURL string // https://api.github.com or https://{host}/api/v3
+	hc      *http.Client
 }
 
-// NewGitHubClient creates a GitHub API client. The host defaults to
-// "github.com" but can be overridden via the GITHUB_HOST env var.
+// NewGitHubClient creates a GitHub API client.
+// Set GITHUB_HOST to override the default (github.com).
+// github.com uses https://api.github.com; any other host uses https://{host}/api/v3 (GHE).
 func NewGitHubClient(repo, token string) Interface {
 	host := os.Getenv("GITHUB_HOST")
 	if host == "" {
 		host = "github.com"
 	}
+	var baseURL string
+	if host == "github.com" || host == "api.github.com" {
+		baseURL = "https://api.github.com"
+	} else {
+		baseURL = "https://" + host + "/api/v3"
+	}
 	return &httpClient{
-		repo:  repo,
-		token: token,
-		host:  host,
+		repo:    repo,
+		token:   token,
+		baseURL: baseURL,
 		hc: &http.Client{
 			Timeout: 30 * time.Second,
 			// Do not follow redirects — a redirect means the host requires
@@ -51,10 +58,9 @@ func NewGitHubClient(repo, token string) Interface {
 	}
 }
 
-// apiURL returns the GitHub Enterprise API URL for a repo path.
-// Format: https://{host}/api/v3/repos/{owner/repo}{suffix}
+// apiURL returns the full API URL for a repo path.
 func (c *httpClient) apiURL(suffix string) string {
-	return "https://" + c.host + "/api/v3/repos/" + c.repo + suffix
+	return c.baseURL + "/repos/" + c.repo + suffix
 }
 
 func (c *httpClient) do(ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
@@ -62,7 +68,7 @@ func (c *httpClient) do(ctx context.Context, method, url string, body io.Reader)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "token "+c.token)
+	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
