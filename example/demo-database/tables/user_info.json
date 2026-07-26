@@ -1,0 +1,22 @@
+{
+  "alice": {
+    "user_name": "alice",
+    "full_name": "Alice Thymefield",
+    "role": "member"
+  },
+  "ayaka": {
+    "user_name": "ayaka",
+    "full_name": "Ayaka Kamisato",
+    "role": "member"
+  },
+  "haiyu": {
+    "user_name": "haiyu",
+    "full_name": "Haiyu Wang",
+    "role": "admin"
+  },
+  "ramiel": {
+    "user_name": "remielle",
+    "full_name": "Remielle Dan",
+    "role": "admin"
+  }
+}
