@@ -14,6 +14,11 @@
     "full_name": "Haiyu Wang",
     "role": "admin"
   },
+  "jane": {
+    "user_name": "jane",
+    "full_name": "Jane Doe",
+    "role": "member"
+  },
   "ramiel": {
     "user_name": "remielle",
     "full_name": "Remielle Dan",
