@@ -14,10 +14,12 @@ import (
 
 // Option is the entry point for opening a ghdb database.
 type Option struct {
-	baseline fs.FS
-	tokenFn  func() string
-	logger   *log.Logger
-	client   github.Interface // non-nil only in tests
+	baseline        fs.FS
+	tokenFn         func() string
+	host            string // GitHub host; defaults to "github.com"
+	offlineFallback bool
+	logger          *log.Logger
+	client          github.Interface // non-nil only in tests
 }
 
 // NewOption creates an Option rooted at baseline (an fs.FS holding db_meta.json and data files).
@@ -29,6 +31,21 @@ func NewOption(baseline fs.FS) *Option {
 // If fn returns empty the DB opens in offline mode (in-memory; Checkpoint errors).
 func (o *Option) Token(fn func() string) *Option {
 	o.tokenFn = fn
+	return o
+}
+
+// AllowOfflineFallback makes Open() return an offline DB instead of an error
+// when StartOnline fails (e.g. bad credentials, GitHub unreachable).
+// The returned DB will have IsOnline() == false and Checkpoint() will return ErrOffline.
+func (o *Option) AllowOfflineFallback() *Option {
+	o.offlineFallback = true
+	return o
+}
+
+// Host sets the GitHub host. Defaults to "github.com".
+// Use the hostname of your GitHub Enterprise Server (e.g. "github.mycompany.com").
+func (o *Option) Host(host string) *Option {
+	o.host = host
 	return o
 }
 
@@ -92,10 +109,14 @@ func (o *Option) Open() (DB, error) {
 		if token == "" {
 			return db, nil
 		}
-		gh = github.NewGitHubClient(cfg.GitHubRepo, token)
+		gh = github.NewGitHubClient(cfg.GitHubRepo, token, o.host)
 	}
 
 	if err := eng.StartOnline(gh); err != nil {
+		if o.offlineFallback {
+			eng.Logger().Printf("ghdb: StartOnline failed (%v); falling back to offline mode", err)
+			return db, nil
+		}
 		return nil, err
 	}
 	return db, nil

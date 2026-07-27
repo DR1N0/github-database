@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 )
@@ -30,10 +29,9 @@ type httpClient struct {
 }
 
 // NewGitHubClient creates a GitHub API client.
-// Set GITHUB_HOST to override the default (github.com).
+// host defaults to "github.com" when empty.
 // github.com uses https://api.github.com; any other host uses https://{host}/api/v3 (GHE).
-func NewGitHubClient(repo, token string) Interface {
-	host := os.Getenv("GITHUB_HOST")
+func NewGitHubClient(repo, token, host string) Interface {
 	if host == "" {
 		host = "github.com"
 	}
