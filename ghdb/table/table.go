@@ -44,7 +44,17 @@ func New(cfg base.Config, data map[string]map[string]json.RawMessage) (TableDB, 
 	eng.SetSnapshotFn(func() (map[string][]byte, error) {
 		files := make(map[string][]byte, len(tdb.tables))
 		for name, tbl := range tdb.tables {
-			d, err := json.MarshalIndent(tbl.data, "", "  ")
+			// Normalize each row through a map so json.Marshal sorts field keys,
+			// keeping checkpoints diff-stable regardless of insertion order.
+			normalized := make(map[string]map[string]json.RawMessage, len(tbl.data))
+			for k, v := range tbl.data {
+				var row map[string]json.RawMessage
+				if err := json.Unmarshal(v, &row); err != nil {
+					return nil, err
+				}
+				normalized[k] = row
+			}
+			d, err := json.MarshalIndent(normalized, "", "  ")
 			if err != nil {
 				return nil, err
 			}

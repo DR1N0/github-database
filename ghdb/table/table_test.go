@@ -1,6 +1,7 @@
 package table
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -158,6 +159,39 @@ func TestTableSetRequiredPresent(t *testing.T) {
 	db := newTableDB(cfg, nil)
 	if err := db.Table("things").Set("x", json.RawMessage(`{"id":"x","name":"Xander"}`)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSnapshotFieldsAreSorted(t *testing.T) {
+	// Insert two rows with fields in different orders to verify the snapshot
+	// normalizes both to sorted key order, making diffs stable.
+	cfg := base.Config{Tables: []base.TableSpec{{Name: "t", Key: "id"}}}
+	db := newTableDB(cfg, nil)
+	// Fields intentionally in reverse alphabetical order.
+	db.Table("t").Set("b", json.RawMessage(`{"z":"last","id":"b","a":"first"}`))
+	db.Table("t").Set("a", json.RawMessage(`{"z":"last","id":"a","a":"first"}`))
+
+	files, err := base.EngineSnapshot(db.eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := files["tables/t.json"]
+
+	// Rows must be in key order (a before b) and fields within each row sorted.
+	want := `{
+  "a": {
+    "a": "first",
+    "id": "a",
+    "z": "last"
+  },
+  "b": {
+    "a": "first",
+    "id": "b",
+    "z": "last"
+  }
+}`
+	if !bytes.Equal(got, []byte(want)) {
+		t.Errorf("snapshot not sorted:\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }
 

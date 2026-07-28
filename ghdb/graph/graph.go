@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"time"
 
 	"github.com/DR1N0/github-database/ghdb/base"
@@ -51,9 +52,19 @@ func New(
 		files := map[string][]byte{}
 
 		for label, vs := range gdb.vertices {
-			records := make([]json.RawMessage, 0, len(vs.data))
-			for _, v := range vs.data {
-				records = append(records, v)
+			// Sort by ID and normalize fields for stable diff output.
+			ids := make([]string, 0, len(vs.data))
+			for id := range vs.data {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			records := make([]map[string]json.RawMessage, 0, len(ids))
+			for _, id := range ids {
+				var obj map[string]json.RawMessage
+				if err := json.Unmarshal(vs.data[id], &obj); err != nil {
+					return nil, err
+				}
+				records = append(records, obj)
 			}
 			data, err := json.MarshalIndent(records, "", "  ")
 			if err != nil {
@@ -77,6 +88,13 @@ func New(
 					ef.Edges = append(ef.Edges, edgeEntry{From: from, To: to})
 				}
 			}
+			// Sort for stable diff output.
+			sort.Slice(ef.Edges, func(i, j int) bool {
+				if ef.Edges[i].From != ef.Edges[j].From {
+					return ef.Edges[i].From < ef.Edges[j].From
+				}
+				return ef.Edges[i].To < ef.Edges[j].To
+			})
 			data, err := json.MarshalIndent(ef, "", "  ")
 			if err != nil {
 				return nil, err

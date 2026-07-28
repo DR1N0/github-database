@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -144,6 +145,65 @@ func TestInNeighbors(t *testing.T) {
 	n := db.InNeighbors("dep", "svc-b")
 	if len(n) != 1 || n[0] != "svc-a" {
 		t.Errorf("InNeighbors(dep)=%v want [svc-a]", n)
+	}
+}
+
+func TestSnapshotVerticesAndEdgesSorted(t *testing.T) {
+	verts := map[string]map[string]json.RawMessage{
+		"svc": {
+			// IDs deliberately out of alphabetical order; fields deliberately reversed.
+			"z-svc": json.RawMessage(`{"name":"z","id":"z-svc"}`),
+			"a-svc": json.RawMessage(`{"name":"a","id":"a-svc"}`),
+		},
+	}
+	edges := map[string]map[string]map[string]struct{}{
+		"dep": {
+			"z-svc": {"a-svc": {}},
+			"a-svc": {"z-svc": {}},
+		},
+	}
+	cfg := base.Config{
+		Vertices: []base.VertexSpec{{Label: "svc"}},
+		Edges:    []base.EdgeSpec{{Label: "dep"}},
+	}
+	db := newGraphDB(cfg, verts, edges)
+
+	files, err := base.EngineSnapshot(db.eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Vertices: a-svc must come before z-svc; fields within each sorted.
+	wantVerts := `[
+  {
+    "id": "a-svc",
+    "name": "a"
+  },
+  {
+    "id": "z-svc",
+    "name": "z"
+  }
+]`
+	if !bytes.Equal(files["vertices/svc.json"], []byte(wantVerts)) {
+		t.Errorf("vertices not sorted:\ngot:\n%s\nwant:\n%s", files["vertices/svc.json"], wantVerts)
+	}
+
+	// Edges: a-svc→z-svc must come before z-svc→a-svc.
+	wantEdges := `{
+  "edgeLabel": "dep",
+  "edges": [
+    {
+      "from": "a-svc",
+      "to": "z-svc"
+    },
+    {
+      "from": "z-svc",
+      "to": "a-svc"
+    }
+  ]
+}`
+	if !bytes.Equal(files["edges/dep.json"], []byte(wantEdges)) {
+		t.Errorf("edges not sorted:\ngot:\n%s\nwant:\n%s", files["edges/dep.json"], wantEdges)
 	}
 }
 

@@ -46,6 +46,11 @@ func EngineWbufLen(eng Engine) int {
 	return len(b.wbuf)
 }
 
+// EngineSnapshot calls the snapshot function and returns the resulting files map.
+func EngineSnapshot(eng Engine) (map[string][]byte, error) {
+	return eng.(*baseDB).snapshotFn()
+}
+
 // EngineWbufOp returns the Op field of the i-th write-buffer entry, or "" if out of range.
 func EngineWbufOp(eng Engine, i int) string {
 	b := eng.(*baseDB)
