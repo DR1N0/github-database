@@ -34,15 +34,17 @@ mydb/
   "mode": "table",
   "github_repo": "owner/repo",
   "delta_branch": "mydb-data",
+  "data_repo_path": "relative/path/to/data",
+  "main_branch": "main",
   "flush_interval_sec": 30,
-  "sync_interval_sec":  30,
+  "sync_interval_sec": 30,
   "tables": [
     {
       "name": "user_info",
       "key": "username",
       "columns": [
-        {"name": "username", "required": true},
-        {"name": "role",     "required": true}
+        { "name": "username", "required": true },
+        { "name": "role", "required": true }
       ]
     }
   ]
@@ -67,6 +69,7 @@ func openDB() (ghdb.TableDB, error) {
     sub, _ := fs.Sub(baseline, "mydb")
     return ghdb.NewOption(sub).
         Token(func() string { return os.Getenv("GITHUB_TOKEN") }).
+        AllowOfflineFallback().
         OpenTable()
 }
 ```
@@ -112,24 +115,24 @@ make run-offline
 
 The example runs an HTTP server on `:8080` with endpoints:
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/table/user_info` | List all records |
-| `GET` | `/api/v1/table/user_info/:key` | Get one record |
-| `PUT` | `/api/v1/table/user_info/:key` | Create or replace |
-| `DELETE` | `/api/v1/table/user_info/:key` | Delete |
-| `POST` | `/api/v1/checkpoint` | Checkpoint to GitHub |
+| Method   | Path                           | Description          |
+| -------- | ------------------------------ | -------------------- |
+| `GET`    | `/api/v1/table/user_info`      | List all records     |
+| `GET`    | `/api/v1/table/user_info/:key` | Get one record       |
+| `PUT`    | `/api/v1/table/user_info/:key` | Create or replace    |
+| `DELETE` | `/api/v1/table/user_info/:key` | Delete               |
+| `POST`   | `/api/v1/checkpoint`           | Checkpoint to GitHub |
 
 ## Configuration reference
 
-| Field | Description |
-|-------|-------------|
-| `name` | Database name (used as path prefix in the repo) |
-| `version` | Schema version; bump to start a new mutation log |
-| `mode` | `"table"` or `"graph"` |
-| `github_repo` | `"owner/repo"` |
-| `delta_branch` | Branch where mutation logs are written |
-| `data_repo_path` | Override the path prefix in the repo (default: `name`) |
-| `baseline_time` | Ignore mutations older than this timestamp |
-| `flush_interval_sec` | How often to flush mutations to GitHub (default: 30) |
-| `sync_interval_sec` | How often to poll for remote mutations (default: 30) |
+| Field                | Description                                            |
+| -------------------- | ------------------------------------------------------ |
+| `name`               | Database name (used as path prefix in the repo)        |
+| `version`            | Schema version; bump to start a new mutation log       |
+| `mode`               | `"table"` or `"graph"`                                 |
+| `github_repo`        | `"owner/repo"`                                         |
+| `delta_branch`       | Branch where mutation logs are written                 |
+| `data_repo_path`     | Override the path prefix in the repo (default: `name`) |
+| `baseline_time`      | Ignore mutations older than this timestamp             |
+| `flush_interval_sec` | How often to flush mutations to GitHub (default: 30)   |
+| `sync_interval_sec`  | How often to poll for remote mutations (default: 30)   |
