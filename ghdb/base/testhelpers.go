@@ -51,6 +51,16 @@ func EngineSnapshot(eng Engine) (map[string][]byte, error) {
 	return eng.(*baseDB).snapshotFn()
 }
 
+// EngineCommitterName returns the committer name set on the engine (for tests).
+func EngineCommitterName(eng Engine) string {
+	return eng.(*baseDB).committerName
+}
+
+// EngineCommitterEmail returns the committer email set on the engine (for tests).
+func EngineCommitterEmail(eng Engine) string {
+	return eng.(*baseDB).committerEmail
+}
+
 // EngineWbufOp returns the Op field of the i-th write-buffer entry, or "" if out of range.
 func EngineWbufOp(eng Engine, i int) string {
 	b := eng.(*baseDB)

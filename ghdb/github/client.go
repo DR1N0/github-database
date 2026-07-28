@@ -248,3 +248,138 @@ func (c *httpClient) CreatePR(ctx context.Context, title, head, base string) (st
 	}
 	return pr.HTMLURL, nil
 }
+
+// GetAuthenticatedUser returns the authenticated user's name and email.
+// Falls back to login if name is empty, and to GitHub's no-reply email if email is hidden.
+func (c *httpClient) GetAuthenticatedUser(ctx context.Context) (string, string, error) {
+	resp, err := c.do(ctx, http.MethodGet, c.baseURL+"/user", nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("ghdb: GetAuthenticatedUser: HTTP %d", resp.StatusCode)
+	}
+	var u struct {
+		Login string `json:"login"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
+		ID    int64  `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
+		return "", "", err
+	}
+	name := u.Name
+	if name == "" {
+		name = u.Login
+	}
+	email := u.Email
+	if email == "" {
+		email = fmt.Sprintf("%d+%s@users.noreply.github.com", u.ID, u.Login)
+	}
+	return name, email, nil
+}
+
+// GetCommitTree returns the git tree SHA of the given commit.
+func (c *httpClient) GetCommitTree(ctx context.Context, commitSHA string) (string, error) {
+	resp, err := c.do(ctx, http.MethodGet, c.apiURL("/git/commits/"+commitSHA), nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ghdb: GetCommitTree %s: HTTP %d", commitSHA, resp.StatusCode)
+	}
+	var commit struct {
+		Tree struct {
+			SHA string `json:"sha"`
+		} `json:"tree"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&commit); err != nil {
+		return "", err
+	}
+	return commit.Tree.SHA, nil
+}
+
+// CreateTree creates a git tree overlaying files on baseTreeSHA.
+// files maps repo-relative paths to raw file content.
+func (c *httpClient) CreateTree(ctx context.Context, baseTreeSHA string, files map[string][]byte) (string, error) {
+	type treeEntry struct {
+		Path    string `json:"path"`
+		Mode    string `json:"mode"`
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	}
+	entries := make([]treeEntry, 0, len(files))
+	for p, content := range files {
+		entries = append(entries, treeEntry{Path: p, Mode: "100644", Type: "blob", Content: string(content)})
+	}
+	b, _ := json.Marshal(map[string]any{"base_tree": baseTreeSHA, "tree": entries})
+	resp, err := c.do(ctx, http.MethodPost, c.apiURL("/git/trees"), bytes.NewReader(b))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("ghdb: CreateTree: HTTP %d", resp.StatusCode)
+	}
+	var result struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.SHA, nil
+}
+
+// CreateCommit creates a git commit. Pass signature="" for unsigned commits.
+// ts is used as both the author and committer timestamp (UTC, second precision).
+func (c *httpClient) CreateCommit(ctx context.Context, treeSHA, parentSHA, message, name, email string, ts time.Time, signature string) (string, error) {
+	type identity struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+		Date  string `json:"date"`
+	}
+	dateStr := ts.UTC().Truncate(time.Second).Format(time.RFC3339)
+	id := identity{Name: name, Email: email, Date: dateStr}
+	body := map[string]any{
+		"message":   message,
+		"tree":      treeSHA,
+		"parents":   []string{parentSHA},
+		"author":    id,
+		"committer": id,
+	}
+	if signature != "" {
+		body["signature"] = signature
+	}
+	b, _ := json.Marshal(body)
+	resp, err := c.do(ctx, http.MethodPost, c.apiURL("/git/commits"), bytes.NewReader(b))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("ghdb: CreateCommit: HTTP %d", resp.StatusCode)
+	}
+	var result struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.SHA, nil
+}
+
+// UpdateRef force-updates a branch ref to commitSHA.
+func (c *httpClient) UpdateRef(ctx context.Context, branch, commitSHA string) error {
+	b, _ := json.Marshal(map[string]any{"sha": commitSHA, "force": true})
+	resp, err := c.do(ctx, http.MethodPatch, c.apiURL("/git/refs/heads/"+branch), bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ghdb: UpdateRef %s: HTTP %d", branch, resp.StatusCode)
+	}
+	return nil
+}

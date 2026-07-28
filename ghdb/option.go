@@ -20,6 +20,9 @@ type Option struct {
 	offlineFallback bool
 	logger          *log.Logger
 	client          github.Interface // non-nil only in tests
+	committerName   string
+	committerEmail  string
+	commitSigner    func([]byte) (string, error)
 }
 
 // NewOption creates an Option rooted at baseline (an fs.FS holding db_meta.json and data files).
@@ -39,6 +42,22 @@ func (o *Option) Token(fn func() string) *Option {
 // The returned DB will have IsOnline() == false and Checkpoint() will return ErrOffline.
 func (o *Option) AllowOfflineFallback() *Option {
 	o.offlineFallback = true
+	return o
+}
+
+// Committer overrides the name and email used as the git committer for checkpoint commits.
+// When not set, the authenticated GitHub user's identity is used.
+func (o *Option) Committer(name, email string) *Option {
+	o.committerName = name
+	o.committerEmail = email
+	return o
+}
+
+// CommitSigner sets the callback that signs checkpoint commits.
+// payload is the raw git commit object. Return an ASCII-armored PGP detached signature.
+// When nil (default), commits are created unsigned.
+func (o *Option) CommitSigner(fn func(payload []byte) (armored string, err error)) *Option {
+	o.commitSigner = fn
 	return o
 }
 
@@ -99,6 +118,11 @@ func (o *Option) Open() (DB, error) {
 	}
 
 	eng.SetLogger(o.logger)
+
+	if o.committerName != "" {
+		eng.SetCommitterIdentity(o.committerName, o.committerEmail)
+	}
+	eng.SetCommitSigner(o.commitSigner)
 
 	gh := o.client
 	if gh == nil {

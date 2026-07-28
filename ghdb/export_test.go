@@ -52,4 +52,12 @@ var (
 	InstanceID = func(db DB) string {
 		return base.EngineInstanceID(engineOf(db))
 	}
+
+	OpenWithClientAndSigner = func(baseline fs.FS, gh github.Interface, signer func([]byte) (string, error)) (DB, error) {
+		return NewOption(baseline).withClient(gh).CommitSigner(signer).Open()
+	}
+
+	OpenWithClientAndCommitter = func(baseline fs.FS, gh github.Interface, name, email string) (DB, error) {
+		return NewOption(baseline).withClient(gh).Committer(name, email).Open()
+	}
 )

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 var _ Interface = (*FakeClient)(nil)
@@ -18,6 +20,16 @@ type PRRecord struct {
 	Head  string
 	Base  string
 	URL   string
+}
+
+// CommitRecord holds the details of the most recent CreateCommit call.
+type CommitRecord struct {
+	TreeSHA   string
+	ParentSHA string
+	Message   string
+	Name      string
+	Email     string
+	Signature string
 }
 
 type fileEntry struct {
@@ -33,6 +45,9 @@ type FakeClient struct {
 	prs               []PRRecord
 	DefaultBranchName string // defaults to "main"
 	getFileCalls      int
+	lastCommit        CommitRecord
+	AuthenticatedName  string // returned by GetAuthenticatedUser; defaults to "Test User"
+	AuthenticatedEmail string // returned by GetAuthenticatedUser; defaults to "<EMAIL_ADDRESS>"
 }
 
 // GetFileCallCount returns the total number of GetFile calls made so far.
@@ -171,4 +186,75 @@ func (fc *FakeClient) PRs() []PRRecord {
 	cp := make([]PRRecord, len(fc.prs))
 	copy(cp, fc.prs)
 	return cp
+}
+
+// GetAuthenticatedUser returns AuthenticatedName/Email (with sensible defaults).
+func (fc *FakeClient) GetAuthenticatedUser(_ context.Context) (string, string, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	name := fc.AuthenticatedName
+	if name == "" {
+		name = "Test User"
+	}
+	email := fc.AuthenticatedEmail
+	if email == "" {
+		email = "<EMAIL_ADDRESS>"
+	}
+	return name, email, nil
+}
+
+// GetCommitTree returns a fixed deterministic tree SHA for use in tests.
+func (fc *FakeClient) GetCommitTree(_ context.Context, _ string) (string, error) {
+	return "basetree0000000000000000000000000000000000", nil
+}
+
+// CreateTree records the call and returns a deterministic SHA derived from the content.
+func (fc *FakeClient) CreateTree(_ context.Context, _ string, files map[string][]byte) (string, error) {
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write(files[k])
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)[:20]), nil
+}
+
+// CreateCommit records the commit details for later inspection via LastCommit().
+func (fc *FakeClient) CreateCommit(_ context.Context, treeSHA, parentSHA, message, name, email string, _ time.Time, signature string) (string, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	record := CommitRecord{
+		TreeSHA:   treeSHA,
+		ParentSHA: parentSHA,
+		Message:   message,
+		Name:      name,
+		Email:     email,
+		Signature: signature,
+	}
+	fc.lastCommit = record
+	suffix := treeSHA
+	if len(suffix) > 10 {
+		suffix = suffix[:10]
+	}
+	return "commitsha-" + suffix, nil
+}
+
+// UpdateRef updates the branch tip to commitSHA.
+func (fc *FakeClient) UpdateRef(_ context.Context, branch, commitSHA string) error {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.ensureMaps()
+	fc.branches[branch] = commitSHA
+	return nil
+}
+
+// LastCommit returns the most recent CreateCommit record.
+func (fc *FakeClient) LastCommit() CommitRecord {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	return fc.lastCommit
 }

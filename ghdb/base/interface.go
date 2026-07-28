@@ -49,4 +49,10 @@ type Engine interface {
 	// Wired by table/graph constructors before StartOnline is called
 	SetApplyFn(fn func(MutationRecord))
 	SetSnapshotFn(fn func() (map[string][]byte, error))
+
+	// SetCommitterIdentity overrides the name/email used for checkpoint commits.
+	// Must be called before StartOnline; if set, StartOnline skips GetAuthenticatedUser.
+	SetCommitterIdentity(name, email string)
+	// SetCommitSigner sets the optional signing callback for checkpoint commits.
+	SetCommitSigner(fn func([]byte) (string, error))
 }

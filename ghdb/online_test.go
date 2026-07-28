@@ -3,6 +3,8 @@ package ghdb_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -75,6 +77,126 @@ func TestOpenOnlineReplay(t *testing.T) {
 		t.Errorf("replay: got %q ok=%v", v, ok)
 	}
 	db.Close(context.Background())
+}
+
+func TestCommitterFromAPI(t *testing.T) {
+	fc, bl := newOnlineFake(t)
+	fc.AuthenticatedName = "API User"
+	fc.AuthenticatedEmail = "<EMAIL_ADDRESS>"
+	db, err := ghdb.OpenWithClient(bl, fc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	if err := db.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	commit := fc.LastCommit()
+	if commit.Name != "API User" {
+		t.Errorf("committer name: got %q want %q", commit.Name, "API User")
+	}
+	if commit.Email != "<EMAIL_ADDRESS>" {
+		t.Errorf("committer email: got %q want %q", commit.Email, "<EMAIL_ADDRESS>")
+	}
+}
+
+func TestCommitterFromOption(t *testing.T) {
+	fc, bl := newOnlineFake(t)
+	fc.AuthenticatedName = "API User" // would be used if override not set
+	db, err := ghdb.OpenWithClientAndCommitter(bl, fc, "Bot", "<EMAIL_ADDRESS>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	if err := db.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	commit := fc.LastCommit()
+	if commit.Name != "Bot" {
+		t.Errorf("committer name: got %q want %q", commit.Name, "Bot")
+	}
+	if commit.Email != "<EMAIL_ADDRESS>" {
+		t.Errorf("committer email: got %q want %q", commit.Email, "<EMAIL_ADDRESS>")
+	}
+}
+
+func TestCheckpointCreatesOneCommit(t *testing.T) {
+	fc, bl := newOnlineFake(t)
+	db, err := ghdb.OpenWithClient(bl, fc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	if err := db.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly one PR should have been created.
+	prs := fc.PRs()
+	if len(prs) != 1 {
+		t.Fatalf("expected 1 PR, got %d", len(prs))
+	}
+	// CreateCommit must have been called (LastCommit non-zero means it was called).
+	if fc.LastCommit().TreeSHA == "" {
+		t.Error("expected CreateCommit to be called; LastCommit.TreeSHA is empty")
+	}
+}
+
+func TestCheckpointUnsignedCommit(t *testing.T) {
+	fc, bl := newOnlineFake(t)
+	db, err := ghdb.OpenWithClient(bl, fc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	if err := db.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if sig := fc.LastCommit().Signature; sig != "" {
+		t.Errorf("unsigned checkpoint: expected empty signature, got %q", sig)
+	}
+}
+
+func TestCheckpointSignedCommit(t *testing.T) {
+	fc, bl := newOnlineFake(t)
+	const sentinel = "-----BEGIN PGP SIGNATURE-----\nsentinel\n-----END PGP SIGNATURE-----"
+	db, err := ghdb.OpenWithClientAndSigner(bl, fc, func(_ []byte) (string, error) {
+		return sentinel, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	if err := db.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if sig := fc.LastCommit().Signature; sig != sentinel {
+		t.Errorf("signed checkpoint: got signature %q, want %q", sig, sentinel)
+	}
+}
+
+func TestCheckpointSignerError(t *testing.T) {
+	fc, bl := newOnlineFake(t)
+	db, err := ghdb.OpenWithClientAndSigner(bl, fc, func(_ []byte) (string, error) {
+		return "", fmt.Errorf("gpg agent not available")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	err = db.Checkpoint(context.Background())
+	if err == nil {
+		t.Fatal("expected error when signer fails")
+	}
+	if !strings.Contains(err.Error(), "sign commit") {
+		t.Errorf("error should mention sign commit, got: %v", err)
+	}
 }
 
 func TestOpenOnlineBaselineTimeCutoff(t *testing.T) {

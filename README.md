@@ -13,7 +13,6 @@ On startup the library reads your baseline `fs.FS` (typically a directory embedd
 ```bash
 cp .env.example .env
 # set GITHUB_TOKEN to a token with repo read/write access
-# set GITHUB_HOST for specific github host (default: github.com)
 ```
 
 ### 2. Create your baseline
@@ -76,6 +75,24 @@ func openDB() (ghdb.TableDB, error) {
 
 Omit `.Token(...)` (or return an empty string) to open in offline mode.
 
+For GitHub Enterprise, add `.Host("your.ghe.host")`. For signed checkpoints (so CI "require signed commits" rules pass), add `.CommitSigner(fn)`:
+
+```go
+ghdb.NewOption(sub).
+    Token(func() string { return os.Getenv("GITHUB_TOKEN") }).
+    Host("github.example.com").             // optional: GitHub Enterprise host
+    Committer("Deploy Bot", "<EMAIL_ADDRESS>"). // optional: override committer identity
+    CommitSigner(func(payload []byte) (string, error) {
+        // payload is the raw git commit object; return an ASCII-armored PGP signature.
+        // Example: shell out to gpg, use a Go GPG library, etc.
+        return signWithGPG(payload)
+    }).
+    AllowOfflineFallback().
+    OpenTable()
+```
+
+When `CommitSigner` is set, each checkpoint commit is signed and GitHub shows a "Verified" badge (assuming your GPG key is registered on the account).
+
 ### 4. Read and write
 
 ```go
@@ -101,7 +118,7 @@ if err := db.Checkpoint(ctx); err != nil {
 }
 ```
 
-Checkpoint commits a full snapshot of current state to the repository and opens a pull request to main.
+Checkpoint commits a full snapshot of current state to the repository in a single atomic commit and opens a pull request to main. If `CommitSigner` is configured, the commit is GPG-signed.
 
 ## Run the example
 

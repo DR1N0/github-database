@@ -38,6 +38,15 @@ func (b *baseDB) StartOnline(gh github.Interface) error {
 	}
 	b.Logger().Printf("ghdb: online mode (credential validated)")
 
+	if b.committerName == "" {
+		name, email, err := gh.GetAuthenticatedUser(ctx)
+		if err != nil {
+			return fmt.Errorf("ghdb: get authenticated user: %w", err)
+		}
+		b.committerName = name
+		b.committerEmail = email
+	}
+
 	b.instanceID = deriveInstanceID()
 	b.online = true
 
@@ -97,6 +106,12 @@ type baseDB struct {
 	applyFn    func(MutationRecord)
 	snapshotFn func() (map[string][]byte, error)
 
+	// Committer identity for checkpoint commits. Set during StartOnline.
+	committerName  string
+	committerEmail string
+	// Optional signing callback. Set via SetCommitSigner before StartOnline.
+	commitSigner func([]byte) (string, error)
+
 	stopCh    chan struct{}
 	flushDone chan struct{}
 	pollDone  chan struct{}
@@ -131,6 +146,15 @@ func (b *baseDB) Logger() *log.Logger {
 
 func (b *baseDB) SetApplyFn(fn func(MutationRecord))                 { b.applyFn = fn }
 func (b *baseDB) SetSnapshotFn(fn func() (map[string][]byte, error)) { b.snapshotFn = fn }
+
+func (b *baseDB) SetCommitterIdentity(name, email string) {
+	b.committerName = name
+	b.committerEmail = email
+}
+
+func (b *baseDB) SetCommitSigner(fn func([]byte) (string, error)) {
+	b.commitSigner = fn
+}
 
 func (b *baseDB) Close(ctx context.Context) error {
 	if !b.online {
