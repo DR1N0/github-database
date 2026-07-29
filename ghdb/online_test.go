@@ -199,6 +199,34 @@ func TestCheckpointSignerError(t *testing.T) {
 	}
 }
 
+func TestCommitSignerRequiresCommitter(t *testing.T) {
+	fc, bl := newOnlineFake(t)
+	_, err := ghdb.OpenWithClientAndSigner(bl, fc, func(_ []byte) (string, error) {
+		return "sig", nil
+	})
+	// OpenWithClientAndSigner sets Committer internally, so this should succeed.
+	if err != nil {
+		t.Errorf("OpenWithClientAndSigner should succeed when committer is set: %v", err)
+	}
+
+	// Direct call without Committer must fail.
+	_, err = ghdb.OpenWithClient(bl, &github.FakeClient{})
+	if err != nil {
+		t.Fatalf("open without signer should succeed: %v", err)
+	}
+}
+
+func TestCommitSignerWithoutCommitterFails(t *testing.T) {
+	_, bl := newOnlineFake(t)
+	_, err := ghdb.OpenSignerOnly(bl, func(_ []byte) (string, error) { return "sig", nil })
+	if err == nil {
+		t.Fatal("expected error when CommitSigner is set without Committer")
+	}
+	if !strings.Contains(err.Error(), "Committer") {
+		t.Errorf("error should mention Committer, got: %v", err)
+	}
+}
+
 func TestOpenOnlineBaselineTimeCutoff(t *testing.T) {
 	fc := &github.FakeClient{}
 	if err := fc.CreateBranch(context.Background(), "ghdb-data", "sha0"); err != nil {

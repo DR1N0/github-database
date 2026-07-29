@@ -119,6 +119,10 @@ func (o *Option) Open() (DB, error) {
 
 	eng.SetLogger(o.logger)
 
+	if o.commitSigner != nil && o.committerEmail == "" {
+		return nil, fmt.Errorf("ghdb: CommitSigner requires Committer(name, email) — the email must match your GPG key registered on GitHub")
+	}
+
 	if o.committerName != "" {
 		eng.SetCommitterIdentity(o.committerName, o.committerEmail)
 	}

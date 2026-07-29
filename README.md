@@ -93,6 +93,10 @@ ghdb.NewOption(sub).
 
 When `CommitSigner` is set, each checkpoint commit is signed and GitHub shows a "Verified" badge (assuming your GPG key is registered on the account).
 
+> **Important:** `CommitSigner` requires `Committer(name, email)` to be set explicitly. The email must match the one associated with your GPG key on GitHub. If `Committer` is omitted, `Open()` returns an error.
+>
+> GitHub retrieves a no-reply address (e.g. `12345+user@users.noreply.github.com`) for many accounts, which will not match a GPG key — commits would be "Unverified". Setting `Committer` explicitly ensures the email in the commit matches the key.
+
 ### 4. Read and write
 
 ```go

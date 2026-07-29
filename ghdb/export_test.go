@@ -54,10 +54,17 @@ var (
 	}
 
 	OpenWithClientAndSigner = func(baseline fs.FS, gh github.Interface, signer func([]byte) (string, error)) (DB, error) {
-		return NewOption(baseline).withClient(gh).CommitSigner(signer).Open()
+		return NewOption(baseline).withClient(gh).
+			Committer("Test Bot", "testbot@example.com").
+			CommitSigner(signer).Open()
 	}
 
 	OpenWithClientAndCommitter = func(baseline fs.FS, gh github.Interface, name, email string) (DB, error) {
 		return NewOption(baseline).withClient(gh).Committer(name, email).Open()
+	}
+
+	// OpenSignerOnly sets CommitSigner without Committer — used to verify the validation error.
+	OpenSignerOnly = func(baseline fs.FS, signer func([]byte) (string, error)) (DB, error) {
+		return NewOption(baseline).CommitSigner(signer).Open()
 	}
 )
