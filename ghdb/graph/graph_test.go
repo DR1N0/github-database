@@ -16,9 +16,9 @@ func makeGraphDB(t *testing.T) *graphDB {
 			"svc-b": json.RawMessage(`{"id":"svc-b","name":"svc-b"}`),
 		},
 	}
-	edges := map[string]map[string]map[string]struct{}{
-		"dep":  {"svc-a": {"svc-b": {}}},
-		"uses": {"svc-a": {"lib-x": {}}},
+	edges := map[string]map[string]map[string]json.RawMessage{
+		"dep":  {"svc-a": {"svc-b": nil}},
+		"uses": {"svc-a": {"lib-x": nil}},
 	}
 	cfg := base.Config{
 		Vertices: []base.VertexSpec{{Label: "component", Properties: []base.PropertySpec{{Name: "name"}}}},
@@ -100,8 +100,8 @@ func TestVertexStoreDeleteIncomingEdgeCascade(t *testing.T) {
 			"svc-b": json.RawMessage(`{"id":"svc-b"}`),
 		},
 	}
-	edges := map[string]map[string]map[string]struct{}{
-		"dep": {"svc-b": {"svc-a": {}}},
+	edges := map[string]map[string]map[string]json.RawMessage{
+		"dep": {"svc-b": {"svc-a": nil}},
 	}
 	cfg := base.Config{Vertices: []base.VertexSpec{{Label: "component"}}, Edges: []base.EdgeSpec{{Label: "dep"}}}
 	db := newGraphDB(cfg, verts, edges)
@@ -156,10 +156,10 @@ func TestSnapshotVerticesAndEdgesSorted(t *testing.T) {
 			"a-svc": json.RawMessage(`{"name":"a","id":"a-svc"}`),
 		},
 	}
-	edges := map[string]map[string]map[string]struct{}{
+	edges := map[string]map[string]map[string]json.RawMessage{
 		"dep": {
-			"z-svc": {"a-svc": {}},
-			"a-svc": {"z-svc": {}},
+			"z-svc": {"a-svc": nil},
+			"a-svc": {"z-svc": nil},
 		},
 	}
 	cfg := base.Config{
@@ -207,6 +207,89 @@ func TestSnapshotVerticesAndEdgesSorted(t *testing.T) {
 	}
 }
 
+func TestSetEdgeCreatesEdgeWithProperties(t *testing.T) {
+	db := makeGraphDB(t)
+	props := json.RawMessage(`{"weight":5,"optional":false}`)
+	if err := db.SetEdge("dep", "svc-a", "new-svc", props); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := db.GetEdge("dep", "svc-a", "new-svc")
+	if !ok {
+		t.Fatal("expected edge after SetEdge")
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal(got, &m)
+	var w int
+	json.Unmarshal(m["weight"], &w)
+	if w != 5 {
+		t.Errorf("weight=%d want 5", w)
+	}
+}
+
+func TestSetEdgeReplacesProperties(t *testing.T) {
+	db := makeGraphDB(t)
+	db.SetEdge("dep", "svc-a", "svc-b", json.RawMessage(`{"weight":1}`))
+	db.SetEdge("dep", "svc-a", "svc-b", json.RawMessage(`{"weight":9}`))
+	got, _ := db.GetEdge("dep", "svc-a", "svc-b")
+	var m map[string]json.RawMessage
+	json.Unmarshal(got, &m)
+	var w int
+	json.Unmarshal(m["weight"], &w)
+	if w != 9 {
+		t.Errorf("weight=%d want 9 after second SetEdge", w)
+	}
+}
+
+func TestPatchEdgeMergesProperties(t *testing.T) {
+	db := makeGraphDB(t)
+	db.SetEdge("dep", "svc-a", "svc-b", json.RawMessage(`{"weight":3,"label":"prod"}`))
+	if err := db.PatchEdge("dep", "svc-a", "svc-b", map[string]json.RawMessage{
+		"weight": json.RawMessage(`7`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.GetEdge("dep", "svc-a", "svc-b")
+	var m map[string]json.RawMessage
+	json.Unmarshal(got, &m)
+	var w int
+	var label string
+	json.Unmarshal(m["weight"], &w)
+	json.Unmarshal(m["label"], &label)
+	if w != 7 {
+		t.Errorf("weight=%d want 7", w)
+	}
+	if label != "prod" {
+		t.Errorf("label=%q want prod (preserved by patch)", label)
+	}
+}
+
+func TestPatchEdgeUpserts(t *testing.T) {
+	db := makeGraphDB(t)
+	if err := db.PatchEdge("dep", "svc-a", "brand-new", map[string]json.RawMessage{
+		"weight": json.RawMessage(`2`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := db.GetEdge("dep", "svc-a", "brand-new")
+	if !ok {
+		t.Fatal("PatchEdge should upsert a missing edge")
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal(got, &m)
+	var w int
+	json.Unmarshal(m["weight"], &w)
+	if w != 2 {
+		t.Errorf("weight=%d want 2", w)
+	}
+}
+
+func TestSetEdgeRejectsNonObjectProps(t *testing.T) {
+	db := makeGraphDB(t)
+	if err := db.SetEdge("dep", "svc-a", "svc-b", json.RawMessage(`[1,2,3]`)); err == nil {
+		t.Error("expected error for non-object props")
+	}
+}
+
 func TestGraphSchema(t *testing.T) {
 	db := makeGraphDB(t)
 	s := db.Schema()
@@ -218,5 +301,131 @@ func TestGraphSchema(t *testing.T) {
 	}
 	if len(s.Edges) != 2 {
 		t.Errorf("Edges len=%d want 2", len(s.Edges))
+	}
+}
+
+func TestGetEdgePropertyLessEdge(t *testing.T) {
+	db := makeGraphDB(t)
+	// "svc-a"→"svc-b" created by makeGraphDB via the edge map (nil props = property-less).
+	props, ok := db.GetEdge("dep", "svc-a", "svc-b")
+	if !ok {
+		t.Fatal("expected edge to exist (created in makeGraphDB)")
+	}
+	if props != nil {
+		t.Errorf("expected nil props for property-less edge, got %s", props)
+	}
+}
+
+func TestGetEdgeMissingEdge(t *testing.T) {
+	db := makeGraphDB(t)
+	_, ok := db.GetEdge("dep", "svc-a", "does-not-exist")
+	if ok {
+		t.Error("expected ok=false for a missing edge")
+	}
+}
+
+func TestOutEdgesWithProperties(t *testing.T) {
+	db := makeGraphDB(t)
+	db.SetEdge("dep", "svc-a", "svc-b", json.RawMessage(`{"weight":4}`))
+	results := db.OutEdges("dep", "svc-a")
+	if len(results) != 1 {
+		t.Fatalf("OutEdges len=%d want 1", len(results))
+	}
+	r := results[0]
+	if r.Label != "dep" || r.From != "svc-a" || r.To != "svc-b" {
+		t.Errorf("unexpected EdgeResult fields: %+v", r)
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal(r.Props, &m)
+	var w int
+	json.Unmarshal(m["weight"], &w)
+	if w != 4 {
+		t.Errorf("Props weight=%d want 4", w)
+	}
+}
+
+func TestInEdgesWithProperties(t *testing.T) {
+	db := makeGraphDB(t)
+	db.SetEdge("dep", "svc-a", "svc-b", json.RawMessage(`{"weight":6}`))
+	results := db.InEdges("dep", "svc-b")
+	if len(results) != 1 {
+		t.Fatalf("InEdges len=%d want 1", len(results))
+	}
+	r := results[0]
+	if r.Label != "dep" || r.From != "svc-a" || r.To != "svc-b" {
+		t.Errorf("unexpected EdgeResult fields: %+v", r)
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal(r.Props, &m)
+	var w int
+	json.Unmarshal(m["weight"], &w)
+	if w != 6 {
+		t.Errorf("Props weight=%d want 6", w)
+	}
+}
+
+func TestSnapshotEdgePropertiesSorted(t *testing.T) {
+	verts := map[string]map[string]json.RawMessage{
+		"svc": {
+			"a": json.RawMessage(`{"id":"a"}`),
+			"b": json.RawMessage(`{"id":"b"}`),
+		},
+	}
+	edges := map[string]map[string]map[string]json.RawMessage{
+		"dep": {
+			"a": {"b": json.RawMessage(`{"z":"last","weight":2}`)},
+		},
+	}
+	cfg := base.Config{
+		Vertices: []base.VertexSpec{{Label: "svc"}},
+		Edges:    []base.EdgeSpec{{Label: "dep"}},
+	}
+	db := newGraphDB(cfg, verts, edges)
+	files, err := base.EngineSnapshot(db.eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"edgeLabel\": \"dep\",\n  \"edges\": [\n    {\n      \"from\": \"a\",\n      \"to\": \"b\",\n      \"properties\": {\n        \"weight\": 2,\n        \"z\": \"last\"\n      }\n    }\n  ]\n}"
+	got := string(files["edges/dep.json"])
+	if got != want {
+		t.Errorf("edge snapshot mismatch:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestAddEdgeBackwardCompat(t *testing.T) {
+	db := makeGraphDB(t)
+	if err := db.AddEdge("dep", "svc-b", "svc-a"); err != nil {
+		t.Fatal(err)
+	}
+	neighbors := db.OutNeighbors("dep", "svc-b")
+	if len(neighbors) != 1 || neighbors[0] != "svc-a" {
+		t.Errorf("OutNeighbors after AddEdge = %v, want [svc-a]", neighbors)
+	}
+	props, ok := db.GetEdge("dep", "svc-b", "svc-a")
+	if !ok {
+		t.Fatal("expected edge to exist after AddEdge")
+	}
+	if props != nil {
+		t.Errorf("AddEdge should create property-less edge, got props %s", props)
+	}
+}
+
+func TestOutEdgesAllLabels(t *testing.T) {
+	// makeGraphDB has "dep": svc-a→svc-b and "uses": svc-a→lib-x.
+	// OutEdges("", "svc-a") must return both.
+	db := makeGraphDB(t)
+	results := db.OutEdges("", "svc-a")
+	if len(results) != 2 {
+		t.Errorf("OutEdges(all labels) len=%d want 2", len(results))
+	}
+}
+
+func TestInEdgesAllLabels(t *testing.T) {
+	// makeGraphDB has "dep": svc-a→svc-b. Add a second label edge pointing at svc-b.
+	db := makeGraphDB(t)
+	db.SetEdge("uses", "svc-a", "svc-b", nil)
+	results := db.InEdges("", "svc-b")
+	if len(results) != 2 {
+		t.Errorf("InEdges(all labels) len=%d want 2", len(results))
 	}
 }

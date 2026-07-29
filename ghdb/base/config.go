@@ -35,7 +35,8 @@ type PropertySpec struct {
 	Name string `json:"name"`
 }
 type EdgeSpec struct {
-	Label string `json:"label"`
+	Label      string         `json:"label"`
+	Properties []PropertySpec `json:"properties,omitempty"`
 }
 func GetDataRepoPath(cfg Config) string {
 	if cfg.DataRepoPath != "" {

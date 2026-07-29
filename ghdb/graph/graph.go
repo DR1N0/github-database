@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 type graphDB struct {
 	eng      base.Engine
 	vertices map[string]*vertexSet
-	edges    map[string]map[string]map[string]struct{} // label->from->to
+	edges    map[string]map[string]map[string]json.RawMessage // label->from->to->props (nil = property-less)
 }
 
 // vertexSet holds in-memory vertex records for one labelled vertex type (unexported).
@@ -27,11 +28,11 @@ type vertexSet struct {
 func New(
 	cfg base.Config,
 	verts map[string]map[string]json.RawMessage,
-	edges map[string]map[string]map[string]struct{},
+	edges map[string]map[string]map[string]json.RawMessage,
 ) (GraphDB, base.Engine) {
 	eng := base.NewBaseDB(cfg)
 	if edges == nil {
-		edges = map[string]map[string]map[string]struct{}{}
+		edges = map[string]map[string]map[string]json.RawMessage{}
 	}
 	gdb := &graphDB{
 		eng:      eng,
@@ -73,9 +74,12 @@ func New(
 			files["vertices/"+label+".json"] = data
 		}
 
+		// Properties holds edge props as a sorted map for deterministic snapshot output.
+		// Only JSON objects are supported; SetEdge must validate props is nil or a JSON object.
 		type edgeEntry struct {
-			From string `json:"from"`
-			To   string `json:"to"`
+			From       string                     `json:"from"`
+			To         string                     `json:"to"`
+			Properties map[string]json.RawMessage `json:"properties,omitempty"`
 		}
 		type edgeFileJSON struct {
 			EdgeLabel string      `json:"edgeLabel"`
@@ -83,9 +87,17 @@ func New(
 		}
 		for label, fromMap := range gdb.edges {
 			ef := edgeFileJSON{EdgeLabel: label, Edges: []edgeEntry{}}
-			for from, toSet := range fromMap {
-				for to := range toSet {
-					ef.Edges = append(ef.Edges, edgeEntry{From: from, To: to})
+			for from, toMap := range fromMap {
+				for to, props := range toMap {
+					entry := edgeEntry{From: from, To: to}
+					if len(props) > 0 {
+						var obj map[string]json.RawMessage
+						if err := json.Unmarshal(props, &obj); err != nil {
+							return nil, fmt.Errorf("ghdb: edge %s %s→%s has non-object props: %w", label, from, to, err)
+						}
+						entry.Properties = obj
+					}
+					ef.Edges = append(ef.Edges, entry)
 				}
 			}
 			// Sort for stable diff output.
@@ -116,7 +128,7 @@ func GetInternal(s GraphDB) base.Engine {
 func newGraphDB(
 	cfg base.Config,
 	verts map[string]map[string]json.RawMessage,
-	edges map[string]map[string]map[string]struct{},
+	edges map[string]map[string]map[string]json.RawMessage,
 ) *graphDB {
 	store, _ := New(cfg, verts, edges)
 	return store.(*graphDB)
@@ -147,16 +159,132 @@ func (db *graphDB) AddEdge(label, from, to string) error {
 	defer db.eng.UnlockCkptRead()
 	db.eng.LockData()
 	if db.edges[label] == nil {
-		db.edges[label] = map[string]map[string]struct{}{}
+		db.edges[label] = map[string]map[string]json.RawMessage{}
 	}
 	if db.edges[label][from] == nil {
-		db.edges[label][from] = map[string]struct{}{}
+		db.edges[label][from] = map[string]json.RawMessage{}
 	}
-	db.edges[label][from][to] = struct{}{}
+	db.edges[label][from][to] = nil
 	db.eng.UnlockData()
 	db.eng.AppendMutation(base.MutationRecord{TS: time.Now().UTC(), Op: "add_edge", From: from, Label: label, To: to})
 	db.eng.Logger().Printf("ghdb: add edge %s: %s→%s", label, from, to)
 	return nil
+}
+
+// SetEdge creates or replaces an edge from→to with the given properties.
+// props must be nil or a valid JSON object; a non-object value is rejected.
+func (db *graphDB) SetEdge(label, from, to string, props json.RawMessage) error {
+	if props != nil {
+		if err := json.Unmarshal(props, &map[string]json.RawMessage{}); err != nil {
+			return fmt.Errorf("ghdb: SetEdge props must be a JSON object or nil: %w", err)
+		}
+	}
+	db.eng.LockCkptRead()
+	defer db.eng.UnlockCkptRead()
+	db.eng.LockData()
+	if db.edges[label] == nil {
+		db.edges[label] = map[string]map[string]json.RawMessage{}
+	}
+	if db.edges[label][from] == nil {
+		db.edges[label][from] = map[string]json.RawMessage{}
+	}
+	db.edges[label][from][to] = props
+	db.eng.UnlockData()
+	db.eng.AppendMutation(base.MutationRecord{
+		TS: time.Now().UTC(), Op: "set_edge",
+		From: from, Label: label, To: to, Value: props,
+	})
+	db.eng.Logger().Printf("ghdb: set edge %s: %s→%s", label, from, to)
+	return nil
+}
+
+// PatchEdge merges fields into the existing edge properties (upserts if absent).
+func (db *graphDB) PatchEdge(label, from, to string, fields map[string]json.RawMessage) error {
+	db.eng.LockCkptRead()
+	defer db.eng.UnlockCkptRead()
+	db.eng.LockData()
+	if db.edges[label] == nil {
+		db.edges[label] = map[string]map[string]json.RawMessage{}
+	}
+	if db.edges[label][from] == nil {
+		db.edges[label][from] = map[string]json.RawMessage{}
+	}
+	merged, err := base.JSONMerge(db.edges[label][from][to], fields)
+	if err != nil {
+		db.eng.UnlockData()
+		return err
+	}
+	db.edges[label][from][to] = merged
+	db.eng.UnlockData()
+	db.eng.AppendMutation(base.MutationRecord{
+		TS: time.Now().UTC(), Op: "patch_edge",
+		From: from, Label: label, To: to, Fields: fields,
+	})
+	db.eng.Logger().Printf("ghdb: patch edge %s: %s→%s", label, from, to)
+	return nil
+}
+
+// GetEdge returns the properties of the edge from→to.
+// Returns nil props for a property-less edge (ok=true). Returns ok=false when the edge does not exist.
+func (db *graphDB) GetEdge(label, from, to string) (json.RawMessage, bool) {
+	db.eng.RLockData()
+	defer db.eng.RUnlockData()
+	fromMap, ok := db.edges[label]
+	if !ok {
+		return nil, false
+	}
+	toMap, ok := fromMap[from]
+	if !ok {
+		return nil, false
+	}
+	props, ok := toMap[to]
+	return props, ok
+}
+
+// OutEdges returns all outgoing edges from id via label, with their properties.
+// Pass label="" to return edges across all labels.
+func (db *graphDB) OutEdges(label, id string) []EdgeResult {
+	db.eng.RLockData()
+	defer db.eng.RUnlockData()
+	var labels []string
+	if label == "" {
+		for l := range db.edges {
+			labels = append(labels, l)
+		}
+	} else {
+		labels = []string{label}
+	}
+	var out []EdgeResult
+	for _, l := range labels {
+		for toID, props := range db.edges[l][id] {
+			out = append(out, EdgeResult{Label: l, From: id, To: toID, Props: props})
+		}
+	}
+	return out
+}
+
+// InEdges returns all incoming edges to id via label, with their properties.
+// Pass label="" to return edges across all labels.
+func (db *graphDB) InEdges(label, id string) []EdgeResult {
+	db.eng.RLockData()
+	defer db.eng.RUnlockData()
+	var labels []string
+	if label == "" {
+		for l := range db.edges {
+			labels = append(labels, l)
+		}
+	} else {
+		labels = []string{label}
+	}
+	var out []EdgeResult
+	for _, l := range labels {
+		for fromID, targets := range db.edges[l] {
+			if props, ok := targets[id]; ok {
+				out = append(out, EdgeResult{Label: l, From: fromID, To: id, Props: props})
+			}
+		}
+	}
+	return out
 }
 
 // RemoveEdge removes the directed edge from -[label]-> to.
@@ -166,6 +294,12 @@ func (db *graphDB) RemoveEdge(label, from, to string) error {
 	db.eng.LockData()
 	if db.edges[label] != nil && db.edges[label][from] != nil {
 		delete(db.edges[label][from], to)
+		if len(db.edges[label][from]) == 0 {
+			delete(db.edges[label], from)
+		}
+		if len(db.edges[label]) == 0 {
+			delete(db.edges, label)
+		}
 	}
 	db.eng.UnlockData()
 	db.eng.AppendMutation(base.MutationRecord{TS: time.Now().UTC(), Op: "remove_edge", From: from, Label: label, To: to})
@@ -303,7 +437,7 @@ func (vs *vertexSet) All() map[string]json.RawMessage {
 }
 
 // applyToGraphDB replays a MutationRecord onto the graph stores and edge maps (called under mu.Lock).
-func applyToGraphDB(vertices map[string]*vertexSet, edges map[string]map[string]map[string]struct{}, r base.MutationRecord) {
+func applyToGraphDB(vertices map[string]*vertexSet, edges map[string]map[string]map[string]json.RawMessage, r base.MutationRecord) {
 	switch r.Op {
 	case "set_vertex":
 		if vs, ok := vertices[r.Label]; ok {
@@ -322,12 +456,31 @@ func applyToGraphDB(vertices map[string]*vertexSet, edges map[string]map[string]
 		}
 	case "add_edge":
 		if edges[r.Label] == nil {
-			edges[r.Label] = map[string]map[string]struct{}{}
+			edges[r.Label] = map[string]map[string]json.RawMessage{}
 		}
 		if edges[r.Label][r.From] == nil {
-			edges[r.Label][r.From] = map[string]struct{}{}
+			edges[r.Label][r.From] = map[string]json.RawMessage{}
 		}
-		edges[r.Label][r.From][r.To] = struct{}{}
+		edges[r.Label][r.From][r.To] = nil
+	case "set_edge":
+		if edges[r.Label] == nil {
+			edges[r.Label] = map[string]map[string]json.RawMessage{}
+		}
+		if edges[r.Label][r.From] == nil {
+			edges[r.Label][r.From] = map[string]json.RawMessage{}
+		}
+		edges[r.Label][r.From][r.To] = r.Value
+	case "patch_edge":
+		if edges[r.Label] == nil {
+			edges[r.Label] = map[string]map[string]json.RawMessage{}
+		}
+		if edges[r.Label][r.From] == nil {
+			edges[r.Label][r.From] = map[string]json.RawMessage{}
+		}
+		merged, err := base.JSONMerge(edges[r.Label][r.From][r.To], r.Fields)
+		if err == nil {
+			edges[r.Label][r.From][r.To] = merged
+		}
 	case "remove_edge", "delete_edge":
 		if edges[r.Label] != nil && edges[r.Label][r.From] != nil {
 			delete(edges[r.Label][r.From], r.To)

@@ -14,7 +14,7 @@ func LoadTableState(fsys fs.FS, cfg Config) (map[string]map[string]json.RawMessa
 
 func LoadGraphState(fsys fs.FS, cfg Config) (
 	vertices map[string]map[string]json.RawMessage,
-	edges map[string]map[string]map[string]struct{},
+	edges map[string]map[string]map[string]json.RawMessage,
 	err error,
 ) {
 	return loadGraphState(fsys, cfg)
@@ -56,18 +56,19 @@ func loadJSONTable(fsys fs.FS, spec TableSpec) (map[string]json.RawMessage, erro
 type edgeFile struct {
 	EdgeLabel string `json:"edgeLabel"`
 	Edges     []struct {
-		From string `json:"from"`
-		To   string `json:"to"`
+		From       string          `json:"from"`
+		To         string          `json:"to"`
+		Properties json.RawMessage `json:"properties,omitempty"`
 	} `json:"edges"`
 }
 
 func loadGraphState(fsys fs.FS, cfg Config) (
 	vertices map[string]map[string]json.RawMessage,
-	edges map[string]map[string]map[string]struct{},
+	edges map[string]map[string]map[string]json.RawMessage,
 	err error,
 ) {
 	vertices = make(map[string]map[string]json.RawMessage, len(cfg.Vertices))
-	edges = make(map[string]map[string]map[string]struct{}, len(cfg.Edges))
+	edges = make(map[string]map[string]map[string]json.RawMessage, len(cfg.Edges))
 
 	for _, vspec := range cfg.Vertices {
 		data, e := loadVertexFile(fsys, vspec.Label)
@@ -117,13 +118,13 @@ func loadVertexFile(fsys fs.FS, label string) (map[string]json.RawMessage, error
 	return result, nil
 }
 
-func loadEdgeFile(fsys fs.FS, label string) (map[string]map[string]struct{}, error) {
+func loadEdgeFile(fsys fs.FS, label string) (map[string]map[string]json.RawMessage, error) {
 	path := "edges/" + label + ".json"
 	f, err := fsys.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			log.Printf("ghdb: %s not found, using empty edge set", path)
-			return map[string]map[string]struct{}{}, nil
+			return map[string]map[string]json.RawMessage{}, nil
 		}
 		return nil, fmt.Errorf("ghdb: open %s: %w", path, err)
 	}
@@ -133,12 +134,12 @@ func loadEdgeFile(fsys fs.FS, label string) (map[string]map[string]struct{}, err
 	if err := json.NewDecoder(f).Decode(&ef); err != nil {
 		return nil, fmt.Errorf("ghdb: decode %s: %w", path, err)
 	}
-	adj := make(map[string]map[string]struct{}, len(ef.Edges))
+	adj := make(map[string]map[string]json.RawMessage, len(ef.Edges))
 	for _, e := range ef.Edges {
 		if adj[e.From] == nil {
-			adj[e.From] = map[string]struct{}{}
+			adj[e.From] = map[string]json.RawMessage{}
 		}
-		adj[e.From][e.To] = struct{}{}
+		adj[e.From][e.To] = e.Properties // nil when field absent in JSON
 	}
 	return adj, nil
 }
