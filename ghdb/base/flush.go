@@ -108,8 +108,17 @@ func splitMutationRecords(recs []MutationRecord, maxBytes, maxRecords int) ([][]
 		if err != nil {
 			return nil, err
 		}
+		if len(line) > MaxSingleMutationBytes {
+			return nil, &ErrMutationTooLarge{Size: len(line), Limit: MaxSingleMutationBytes}
+		}
 		if len(line) > maxBytes {
-			return nil, fmt.Errorf("ghdb: mutation record is %d bytes, exceeding max delta segment bytes %d", len(line), maxBytes)
+			if len(current) > 0 {
+				batches = append(batches, current)
+				current = nil
+				currentBytes = 0
+			}
+			batches = append(batches, []MutationRecord{rec})
+			continue
 		}
 		if len(current) > 0 && (currentBytes+len(line) > maxBytes || len(current) >= maxRecords) {
 			batches = append(batches, current)
@@ -263,7 +272,7 @@ func (b *baseDB) flush(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if len(content) > maxBytes {
+		if len(content) > maxBytes && !(len(batch) == 1 && len(prior) == 0 && currentSHA == "" && len(content) <= MaxSingleMutationBytes) {
 			return fmt.Errorf("ghdb: delta segment %s exceeds max bytes", path)
 		}
 		msg := fmt.Sprintf("ghdb: flush %s ver %d (%d records)", instanceID, ver, len(batch))

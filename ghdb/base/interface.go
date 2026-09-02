@@ -32,6 +32,7 @@ type Engine interface {
 
 	// Write buffer
 	AppendMutation(r MutationRecord)
+	ValidateMutation(r MutationRecord) error
 
 	// Guards and config
 	IsOnline() bool

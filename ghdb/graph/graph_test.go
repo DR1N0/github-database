@@ -3,10 +3,80 @@ package graph
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/DR1N0/github-database/ghdb/base"
 )
+
+func TestOversizedMutationRecordRejectedBeforeGraphStateChange(t *testing.T) {
+	db := makeGraphDB(t)
+	payload, err := json.Marshal(map[string]string{"id": "svc-a", "payload": string(bytes.Repeat([]byte("x"), base.MaxSingleMutationBytes))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Vertex("component").Set("svc-a", payload)
+	var tooLarge *base.ErrMutationTooLarge
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("Vertex.Set error = %v, want ErrMutationTooLarge", err)
+	}
+	if got := base.EngineWbufLen(db.eng); got != 0 {
+		t.Fatalf("write buffer length = %d, want 0", got)
+	}
+}
+
+func TestOversizedGraphOperationsLeaveStateAndBufferUnchanged(t *testing.T) {
+	big := string(bytes.Repeat([]byte("x"), base.MaxSingleMutationBytes))
+	assertTooLarge := func(t *testing.T, err error) {
+		t.Helper()
+		var target *base.ErrMutationTooLarge
+		if !errors.As(err, &target) {
+			t.Fatalf("error = %v, want ErrMutationTooLarge", err)
+		}
+	}
+	db := makeGraphDB(t)
+	assertTooLarge(t, db.Vertex("component").Set(big, json.RawMessage(`{}`)))
+	assertTooLarge(t, db.Vertex("component").Patch(big, map[string]json.RawMessage{}))
+	assertTooLarge(t, db.SetEdge("dep", big, "to", json.RawMessage(`{}`)))
+	assertTooLarge(t, db.PatchEdge("dep", big, "to", map[string]json.RawMessage{}))
+	assertTooLarge(t, db.AddEdge("dep", big, "to"))
+	assertTooLarge(t, db.RemoveEdge("dep", big, "to"))
+	// Seed a cascade whose constructed delete-edge record exceeds the ceiling.
+	db.edges[big] = map[string]map[string]json.RawMessage{"svc-a": {"svc-b": nil}}
+	assertTooLarge(t, db.Vertex("component").Delete("svc-a"))
+	if _, ok := db.Vertex("component").Get("svc-a"); !ok {
+		t.Fatal("vertex changed after rejected cascade")
+	}
+	if _, ok := db.GetEdge(big, "svc-a", "svc-b"); !ok {
+		t.Fatal("edge changed after rejected cascade")
+	}
+	if got := base.EngineWbufLen(db.eng); got != 0 {
+		t.Fatalf("write buffer length = %d, want 0", got)
+	}
+}
+
+func TestVertexDeleteSelfLoopEmitsOneCascadeMutation(t *testing.T) {
+	db := makeGraphDB(t)
+	db.edges = map[string]map[string]map[string]json.RawMessage{"dep": {"svc-a": {"svc-a": nil}}}
+	if err := db.Vertex("component").Delete("svc-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := db.Vertex("component").Get("svc-a"); ok {
+		t.Fatal("vertex remains after delete")
+	}
+	if _, ok := db.GetEdge("dep", "svc-a", "svc-a"); ok {
+		t.Fatal("self-loop remains after delete")
+	}
+	if got := base.EngineWbufLen(db.eng); got != 2 {
+		t.Fatalf("queued records = %d, want one delete_edge and delete_vertex", got)
+	}
+	if got := base.EngineWbufOp(db.eng, 0); got != "delete_edge" {
+		t.Fatalf("first queued op = %q, want delete_edge", got)
+	}
+	if got := base.EngineWbufOp(db.eng, 1); got != "delete_vertex" {
+		t.Fatalf("second queued op = %q, want delete_vertex", got)
+	}
+}
 
 func makeGraphDB(t *testing.T) *graphDB {
 	t.Helper()

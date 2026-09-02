@@ -3,10 +3,49 @@ package table
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/DR1N0/github-database/ghdb/base"
 )
+
+func TestOversizedMutationRecordRejectedBeforeTableStateChange(t *testing.T) {
+	db := makeTableDB(t)
+	payload, err := json.Marshal(map[string]string{"name": "svc-a", "payload": string(bytes.Repeat([]byte("x"), base.MaxSingleMutationBytes))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Table("components").Set("svc-a", payload)
+	var tooLarge *base.ErrMutationTooLarge
+	if !errors.As(err, &tooLarge) {
+		t.Fatalf("Set error = %v, want ErrMutationTooLarge", err)
+	}
+	if got := base.EngineWbufLen(db.eng); got != 0 {
+		t.Fatalf("write buffer length = %d, want 0", got)
+	}
+}
+
+func TestOversizedTableOperationsLeaveStateAndBufferUnchanged(t *testing.T) {
+	db := makeTableDB(t)
+	big := string(bytes.Repeat([]byte("x"), base.MaxSingleMutationBytes))
+	assertTooLarge := func(t *testing.T, err error) {
+		t.Helper()
+		var target *base.ErrMutationTooLarge
+		if !errors.As(err, &target) {
+			t.Fatalf("error = %v, want ErrMutationTooLarge", err)
+		}
+	}
+	assertTooLarge(t, db.Table("components").Set("svc-a", json.RawMessage(`{"name":"svc-a","payload":"`+big+`"}`)))
+	assertTooLarge(t, db.Table("components").Patch("svc-a", map[string]json.RawMessage{"payload": json.RawMessage(`"` + big + `"`)}))
+	assertTooLarge(t, db.Table("components").Delete(big))
+	value, ok := db.Table("components").Get("svc-a")
+	if !ok || string(value) != `{"name":"svc-a","version":"1.0"}` {
+		t.Fatal("table state changed after rejected mutation")
+	}
+	if got := base.EngineWbufLen(db.eng); got != 0 {
+		t.Fatalf("write buffer length = %d, want 0", got)
+	}
+}
 
 func makeTableDB(t *testing.T) *tableDB {
 	t.Helper()

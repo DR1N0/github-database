@@ -127,6 +127,26 @@ func (b *baseDB) UnlockData()     { b.mu.Unlock() }
 func (b *baseDB) RLockData()      { b.mu.RLock() }
 func (b *baseDB) RUnlockData()    { b.mu.RUnlock() }
 
+type ErrMutationTooLarge struct {
+	Size  int
+	Limit int
+}
+
+func (e *ErrMutationTooLarge) Error() string {
+	return fmt.Sprintf("ghdb: change is too large: %d bytes exceeds %d bytes", e.Size, e.Limit)
+}
+
+func (b *baseDB) ValidateMutation(r MutationRecord) error {
+	data, err := MarshalJSONL([]MutationRecord{r})
+	if err != nil {
+		return err
+	}
+	if len(data) > MaxSingleMutationBytes {
+		return &ErrMutationTooLarge{Size: len(data), Limit: MaxSingleMutationBytes}
+	}
+	return nil
+}
+
 func (b *baseDB) AppendMutation(r MutationRecord) {
 	b.wbufMu.Lock()
 	b.wbuf = append(b.wbuf, r)

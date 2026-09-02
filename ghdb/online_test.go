@@ -664,28 +664,67 @@ func TestFlushSegmentRecordCap(t *testing.T) {
 	}
 }
 
-func TestFlushOversizedMutationRetainsBuffer(t *testing.T) {
-	fc, db := openOnlineWithSegmentCaps(t, 100, 100)
+func TestFlushOversizedMutationUsesImmutableSegment(t *testing.T) {
+	const maxBytes = 300
+	fc, db := openOnlineWithSegmentCaps(t, maxBytes, 100)
 	defer db.Close(context.Background())
 	ghdb.SetInstanceID(db, "pod-oversized")
 	setSegmentRecord(t, db, "large", 500)
-	putCalls := fc.PutFileCallCount()
 
-	if err := ghdb.Flush(db, context.Background()); err == nil {
-		t.Fatal("Flush error = nil, want oversized mutation error")
-	}
-	if got := ghdb.EngineWbufLen(db); got != 1 {
-		t.Fatalf("write buffer length = %d, want 1", got)
-	}
-	if got := fc.PutFileCallCount(); got != putCalls {
-		t.Fatalf("PutFile calls = %d, want %d", got, putCalls)
+	if err := ghdb.Flush(db, context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 	entries, err := fc.ListDir(context.Background(), "ghdb-data", "testdb/v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("segment entries = %#v, want none", entries)
+	if len(entries) != 1 {
+		t.Fatalf("segment entries = %#v, want one immutable segment", entries)
+	}
+	content, _, err := fc.GetFile(context.Background(), "ghdb-data", "testdb/v1/"+entries[0].Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) <= maxBytes {
+		t.Fatalf("immutable segment has %d bytes, want over normal cap", len(content))
+	}
+	setSegmentRecord(t, db, "normal", 1)
+	if err := ghdb.Flush(db, context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = fc.ListDir(context.Background(), "ghdb-data", "testdb/v1")
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("segments after normal mutation = %#v, %v; want two", entries, err)
+	}
+	foundNormal := false
+	for _, entry := range entries {
+		data, _, err := fc.GetFile(context.Background(), "ghdb-data", "testdb/v1/"+entry.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records, err := ghdb.UnmarshalJSONL(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) == 1 && records[0].Key == "normal" {
+			foundNormal = true
+			if len(data) > maxBytes {
+				t.Fatalf("normal segment %s has %d bytes, cap %d", entry.Name, len(data), maxBytes)
+			}
+		}
+	}
+	if !foundNormal {
+		t.Fatal("normal mutation was not written to its own segment")
+	}
+	replayed, err := ghdb.OpenWithClient(onlineBaselineWithSegmentCaps(t, maxBytes, 100), fc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replayed.Close(context.Background())
+	for _, key := range []string{"large", "normal"} {
+		if _, ok := replayed.(ghdb.TableDB).Table("things").Get(key); !ok {
+			t.Fatalf("replay missing %q", key)
+		}
 	}
 }
 

@@ -214,5 +214,9 @@ var ErrKeyMismatch = table.ErrKeyMismatch
 var ErrRequiredMissing = table.ErrRequiredMissing
 var ErrOffline = base.ErrOffline
 
+type ErrMutationTooLarge = base.ErrMutationTooLarge
+
+const MaxSingleMutationBytes = base.MaxSingleMutationBytes
+
 type GraphDB = graph.GraphDB
 type VertexSet = graph.VertexSet

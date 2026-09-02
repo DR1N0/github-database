@@ -3,6 +3,7 @@ package base
 import "time"
 
 const (
+	MaxSingleMutationBytes = 32 * 1024 * 1024
 	// DefaultMaxDeltaSegmentBytes bounds the default size of an online delta segment.
 	DefaultMaxDeltaSegmentBytes = 786_432
 	// DefaultMaxDeltaSegmentRecords bounds the default number of records in an online delta segment.

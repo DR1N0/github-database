@@ -142,18 +142,16 @@ func (t *table) Set(key string, value json.RawMessage) error {
 	if err := t.validateRequired(row); err != nil {
 		return err
 	}
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set", Table: t.spec.Name, Key: key, Value: value}
+	if err := t.eng.ValidateMutation(record); err != nil {
+		return err
+	}
 	t.eng.LockCkptRead()
 	defer t.eng.UnlockCkptRead()
 	t.eng.LockData()
 	t.data[key] = value
 	t.eng.UnlockData()
-	t.eng.AppendMutation(base.MutationRecord{
-		TS:    time.Now().UTC(),
-		Op:    "set",
-		Table: t.spec.Name,
-		Key:   key,
-		Value: value,
-	})
+	t.eng.AppendMutation(record)
 	t.eng.Logger().Printf("ghdb: set %s/%s", t.spec.Name, key)
 	return nil
 }
@@ -162,6 +160,10 @@ func (t *table) Set(key string, value json.RawMessage) error {
 // Returns ErrKeyMismatch if fields contains the key field with a value that does not match key.
 func (t *table) Patch(key string, fields map[string]json.RawMessage) error {
 	if err := t.validateKeyField(key, fields, false); err != nil {
+		return err
+	}
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch", Table: t.spec.Name, Key: key, Fields: fields}
+	if err := t.eng.ValidateMutation(record); err != nil {
 		return err
 	}
 	t.eng.LockCkptRead()
@@ -174,30 +176,23 @@ func (t *table) Patch(key string, fields map[string]json.RawMessage) error {
 	}
 	t.data[key] = merged
 	t.eng.UnlockData()
-	t.eng.AppendMutation(base.MutationRecord{
-		TS:     time.Now().UTC(),
-		Op:     "patch",
-		Table:  t.spec.Name,
-		Key:    key,
-		Fields: fields,
-	})
+	t.eng.AppendMutation(record)
 	t.eng.Logger().Printf("ghdb: patch %s/%s", t.spec.Name, key)
 	return nil
 }
 
 // Delete removes key from the table and buffers a mutation record.
 func (t *table) Delete(key string) error {
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "delete", Table: t.spec.Name, Key: key}
+	if err := t.eng.ValidateMutation(record); err != nil {
+		return err
+	}
 	t.eng.LockCkptRead()
 	defer t.eng.UnlockCkptRead()
 	t.eng.LockData()
 	delete(t.data, key)
 	t.eng.UnlockData()
-	t.eng.AppendMutation(base.MutationRecord{
-		TS:    time.Now().UTC(),
-		Op:    "delete",
-		Table: t.spec.Name,
-		Key:   key,
-	})
+	t.eng.AppendMutation(record)
 	t.eng.Logger().Printf("ghdb: delete %s/%s", t.spec.Name, key)
 	return nil
 }

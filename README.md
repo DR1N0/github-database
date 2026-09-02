@@ -126,7 +126,7 @@ Checkpoint commits a full snapshot of current state to the repository in a singl
 
 ### Online delta segments
 
-In online mode, each pod writes bounded JSONL delta segments and rolls over to a new segment when its configured byte or record cap is reached. Before deploying this version, operators must restore any already-truncated delta logs from Git history or verified backups.
+In online mode, each pod writes bounded JSONL delta segments and rolls over to a new segment when its configured byte or record cap is reached. A fixed, non-configurable 32 MiB ceiling applies to each mutation: records above normal segment limits but at or below that ceiling are stored in immutable one-record segments, while larger changes fail at the caller API with `change is too large` and leave local state unchanged. Before deploying this version, operators must restore any already-truncated delta logs from Git history or verified backups.
 
 ## Run the example
 

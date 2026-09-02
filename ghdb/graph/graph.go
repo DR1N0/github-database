@@ -155,6 +155,10 @@ func (db *graphDB) Close(ctx context.Context) error {
 
 // AddEdge adds a directed edge from -[label]-> to.
 func (db *graphDB) AddEdge(label, from, to string) error {
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "add_edge", From: from, Label: label, To: to}
+	if err := db.eng.ValidateMutation(record); err != nil {
+		return err
+	}
 	db.eng.LockCkptRead()
 	defer db.eng.UnlockCkptRead()
 	db.eng.LockData()
@@ -166,7 +170,7 @@ func (db *graphDB) AddEdge(label, from, to string) error {
 	}
 	db.edges[label][from][to] = nil
 	db.eng.UnlockData()
-	db.eng.AppendMutation(base.MutationRecord{TS: time.Now().UTC(), Op: "add_edge", From: from, Label: label, To: to})
+	db.eng.AppendMutation(record)
 	db.eng.Logger().Printf("ghdb: add edge %s: %s→%s", label, from, to)
 	return nil
 }
@@ -179,6 +183,10 @@ func (db *graphDB) SetEdge(label, from, to string, props json.RawMessage) error 
 			return fmt.Errorf("ghdb: SetEdge props must be a JSON object or nil: %w", err)
 		}
 	}
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set_edge", From: from, Label: label, To: to, Value: props}
+	if err := db.eng.ValidateMutation(record); err != nil {
+		return err
+	}
 	db.eng.LockCkptRead()
 	defer db.eng.UnlockCkptRead()
 	db.eng.LockData()
@@ -190,16 +198,17 @@ func (db *graphDB) SetEdge(label, from, to string, props json.RawMessage) error 
 	}
 	db.edges[label][from][to] = props
 	db.eng.UnlockData()
-	db.eng.AppendMutation(base.MutationRecord{
-		TS: time.Now().UTC(), Op: "set_edge",
-		From: from, Label: label, To: to, Value: props,
-	})
+	db.eng.AppendMutation(record)
 	db.eng.Logger().Printf("ghdb: set edge %s: %s→%s", label, from, to)
 	return nil
 }
 
 // PatchEdge merges fields into the existing edge properties (upserts if absent).
 func (db *graphDB) PatchEdge(label, from, to string, fields map[string]json.RawMessage) error {
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch_edge", From: from, Label: label, To: to, Fields: fields}
+	if err := db.eng.ValidateMutation(record); err != nil {
+		return err
+	}
 	db.eng.LockCkptRead()
 	defer db.eng.UnlockCkptRead()
 	db.eng.LockData()
@@ -216,10 +225,7 @@ func (db *graphDB) PatchEdge(label, from, to string, fields map[string]json.RawM
 	}
 	db.edges[label][from][to] = merged
 	db.eng.UnlockData()
-	db.eng.AppendMutation(base.MutationRecord{
-		TS: time.Now().UTC(), Op: "patch_edge",
-		From: from, Label: label, To: to, Fields: fields,
-	})
+	db.eng.AppendMutation(record)
 	db.eng.Logger().Printf("ghdb: patch edge %s: %s→%s", label, from, to)
 	return nil
 }
@@ -289,6 +295,10 @@ func (db *graphDB) InEdges(label, id string) []EdgeResult {
 
 // RemoveEdge removes the directed edge from -[label]-> to.
 func (db *graphDB) RemoveEdge(label, from, to string) error {
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "remove_edge", From: from, Label: label, To: to}
+	if err := db.eng.ValidateMutation(record); err != nil {
+		return err
+	}
 	db.eng.LockCkptRead()
 	defer db.eng.UnlockCkptRead()
 	db.eng.LockData()
@@ -302,7 +312,7 @@ func (db *graphDB) RemoveEdge(label, from, to string) error {
 		}
 	}
 	db.eng.UnlockData()
-	db.eng.AppendMutation(base.MutationRecord{TS: time.Now().UTC(), Op: "remove_edge", From: from, Label: label, To: to})
+	db.eng.AppendMutation(record)
 	db.eng.Logger().Printf("ghdb: remove edge %s: %s→%s", label, from, to)
 	return nil
 }
@@ -369,18 +379,26 @@ func (vs *vertexSet) Get(id string) (json.RawMessage, bool) {
 
 // Set writes value under id and buffers a mutation record.
 func (vs *vertexSet) Set(id string, value json.RawMessage) error {
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set_vertex", Label: vs.label, ID: id, Value: value}
+	if err := vs.db.eng.ValidateMutation(record); err != nil {
+		return err
+	}
 	vs.db.eng.LockCkptRead()
 	defer vs.db.eng.UnlockCkptRead()
 	vs.db.eng.LockData()
 	vs.data[id] = value
 	vs.db.eng.UnlockData()
-	vs.db.eng.AppendMutation(base.MutationRecord{TS: time.Now().UTC(), Op: "set_vertex", Label: vs.label, ID: id, Value: value})
+	vs.db.eng.AppendMutation(record)
 	vs.db.eng.Logger().Printf("ghdb: set vertex/%s/%s", vs.label, id)
 	return nil
 }
 
 // Patch merges fields into the existing vertex record (upsert if absent) and buffers a mutation.
 func (vs *vertexSet) Patch(id string, fields map[string]json.RawMessage) error {
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch_vertex", Label: vs.label, ID: id, Fields: fields}
+	if err := vs.db.eng.ValidateMutation(record); err != nil {
+		return err
+	}
 	vs.db.eng.LockCkptRead()
 	defer vs.db.eng.UnlockCkptRead()
 	vs.db.eng.LockData()
@@ -391,7 +409,7 @@ func (vs *vertexSet) Patch(id string, fields map[string]json.RawMessage) error {
 	}
 	vs.data[id] = merged
 	vs.db.eng.UnlockData()
-	vs.db.eng.AppendMutation(base.MutationRecord{TS: time.Now().UTC(), Op: "patch_vertex", Label: vs.label, ID: id, Fields: fields})
+	vs.db.eng.AppendMutation(record)
 	vs.db.eng.Logger().Printf("ghdb: patch vertex/%s/%s", vs.label, id)
 	return nil
 }
@@ -403,24 +421,34 @@ func (vs *vertexSet) Delete(id string) error {
 	now := time.Now().UTC()
 	var cascade []base.MutationRecord
 	vs.db.eng.LockData()
-	delete(vs.data, id)
 	for edgeLabel, fromMap := range vs.db.edges {
 		for toID := range fromMap[id] {
 			cascade = append(cascade, base.MutationRecord{TS: now, Op: "delete_edge", From: id, Label: edgeLabel, To: toID})
 		}
-		delete(fromMap, id)
 		for fromID, targets := range fromMap {
-			if _, exists := targets[id]; exists {
-				cascade = append(cascade, base.MutationRecord{TS: now, Op: "delete_edge", From: fromID, Label: edgeLabel, To: id})
-				delete(targets, id)
+			if fromID != id {
+				if _, exists := targets[id]; exists {
+					cascade = append(cascade, base.MutationRecord{TS: now, Op: "delete_edge", From: fromID, Label: edgeLabel, To: id})
+				}
 			}
 		}
+	}
+	deleteRecord := base.MutationRecord{TS: now, Op: "delete_vertex", Label: vs.label, ID: id}
+	for _, r := range append(cascade, deleteRecord) {
+		if err := vs.db.eng.ValidateMutation(r); err != nil {
+			vs.db.eng.UnlockData()
+			return err
+		}
+	}
+	delete(vs.data, id)
+	for _, r := range cascade {
+		delete(vs.db.edges[r.Label][r.From], r.To)
 	}
 	vs.db.eng.UnlockData()
 	for _, r := range cascade {
 		vs.db.eng.AppendMutation(r)
 	}
-	vs.db.eng.AppendMutation(base.MutationRecord{TS: now, Op: "delete_vertex", Label: vs.label, ID: id})
+	vs.db.eng.AppendMutation(deleteRecord)
 	vs.db.eng.Logger().Printf("ghdb: delete vertex/%s/%s", vs.label, id)
 	return nil
 }
