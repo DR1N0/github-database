@@ -122,7 +122,11 @@ if err := db.Checkpoint(ctx); err != nil {
 }
 ```
 
-Checkpoint commits a full snapshot of current state to the repository in a single atomic commit and opens a pull request to main. If `CommitSigner` is configured, the commit is GPG-signed.
+Checkpoint commits a full snapshot of current state to the repository in a single atomic commit and opens a pull request to main. If `CommitSigner` is configured, the commit is GPG-signed. A checkpoint starts a new delta version.
+
+### Online delta segments
+
+In online mode, each pod writes bounded JSONL delta segments and rolls over to a new segment when its configured byte or record cap is reached. Before deploying this version, operators must restore any already-truncated delta logs from Git history or verified backups.
 
 ## Run the example
 
@@ -155,5 +159,7 @@ The example runs an HTTP server on `:8080` with endpoints:
 | `delta_branch`       | Branch where mutation logs are written                 |
 | `data_repo_path`     | Override the path prefix in the repo (default: `name`) |
 | `baseline_time`      | Ignore mutations older than this timestamp             |
-| `flush_interval_sec` | How often to flush mutations to GitHub (default: 30)   |
-| `sync_interval_sec`  | How often to poll for remote mutations (default: 30)   |
+| `flush_interval_sec`          | How often to flush mutations to GitHub (default: 30)       |
+| `sync_interval_sec`           | How often to poll for remote mutations (default: 30)       |
+| `max_delta_segment_bytes`     | Online delta segment byte cap (default: 786432; max: 917504) |
+| `max_delta_segment_records`   | Online delta segment record cap (default: 1000)             |

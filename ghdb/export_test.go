@@ -52,6 +52,15 @@ var (
 	InstanceID = func(db DB) string {
 		return base.EngineInstanceID(engineOf(db))
 	}
+	SetInstanceID = func(db DB, instanceID string) {
+		base.SetEngineInstanceID(engineOf(db), instanceID)
+	}
+	EngineWbufLen = func(db DB) int {
+		return base.EngineWbufLen(engineOf(db))
+	}
+	SetApplyFn = func(db DB, fn func(MutationRecord)) {
+		engineOf(db).SetApplyFn(fn)
+	}
 
 	OpenWithClientAndSigner = func(baseline fs.FS, gh github.Interface, signer func([]byte) (string, error)) (DB, error) {
 		return NewOption(baseline).withClient(gh).

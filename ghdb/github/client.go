@@ -90,11 +90,46 @@ func (c *httpClient) GetFile(ctx context.Context, branch, path string) ([]byte, 
 		return nil, "", fmt.Errorf("ghdb: GetFile %s: HTTP %d", path, resp.StatusCode)
 	}
 	var payload struct {
-		Content string `json:"content"`
-		SHA     string `json:"sha"`
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+		SHA      string `json:"sha"`
+		Size     *int   `json:"size"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, "", err
+	}
+	if payload.Size == nil {
+		return nil, "", fmt.Errorf("ghdb: GetFile %s: missing size", path)
+	}
+	if payload.SHA == "" {
+		return nil, "", fmt.Errorf("ghdb: GetFile %s: missing SHA", path)
+	}
+	if *payload.Size > 0 && (payload.Content == "" || payload.Encoding == "none") {
+		blobResp, err := c.do(ctx, http.MethodGet, c.apiURL("/git/blobs/"+payload.SHA), nil)
+		if err != nil {
+			return nil, "", err
+		}
+		defer blobResp.Body.Close()
+		if blobResp.StatusCode != http.StatusOK {
+			return nil, "", fmt.Errorf("ghdb: GetFile blob %s: HTTP %d", payload.SHA, blobResp.StatusCode)
+		}
+		var blob struct {
+			Content *string `json:"content"`
+		}
+		if err := json.NewDecoder(blobResp.Body).Decode(&blob); err != nil {
+			return nil, "", err
+		}
+		if blob.Content == nil {
+			return nil, "", fmt.Errorf("ghdb: GetFile blob %s: missing content", payload.SHA)
+		}
+		content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(*blob.Content, "\n", ""))
+		if err != nil {
+			return nil, "", err
+		}
+		if len(content) != *payload.Size {
+			return nil, "", fmt.Errorf("ghdb: GetFile blob %s: decoded size %d does not match declared size %d", payload.SHA, len(content), *payload.Size)
+		}
+		return content, payload.SHA, nil
 	}
 	// GitHub returns base64 with newlines; strip them before decoding.
 	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(payload.Content, "\n", ""))

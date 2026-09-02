@@ -161,6 +161,18 @@ func parseAndLoad(baseline fs.FS) (base.Config, DB, base.Engine, error) {
 	if err := json.Unmarshal(metaData, &cfg); err != nil {
 		return base.Config{}, nil, nil, fmt.Errorf("ghdb: parse db_meta.json: %w", err)
 	}
+	if cfg.MaxDeltaSegmentBytes < 0 || cfg.MaxDeltaSegmentBytes > base.MaxDeltaSegmentBytes {
+		return base.Config{}, nil, nil, fmt.Errorf("ghdb: max_delta_segment_bytes must be between 0 and %d", base.MaxDeltaSegmentBytes)
+	}
+	if cfg.MaxDeltaSegmentRecords < 0 {
+		return base.Config{}, nil, nil, fmt.Errorf("ghdb: max_delta_segment_records must be non-negative")
+	}
+	if cfg.MaxDeltaSegmentBytes == 0 {
+		cfg.MaxDeltaSegmentBytes = base.DefaultMaxDeltaSegmentBytes
+	}
+	if cfg.MaxDeltaSegmentRecords == 0 {
+		cfg.MaxDeltaSegmentRecords = base.DefaultMaxDeltaSegmentRecords
+	}
 
 	var db DB
 	var eng base.Engine

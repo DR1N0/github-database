@@ -39,13 +39,17 @@ type fileEntry struct {
 
 // FakeClient is an in-memory implementation of Interface for use in tests.
 type FakeClient struct {
-	mu                sync.Mutex
-	branches          map[string]string                // branch name → tip SHA
-	files             map[string]map[string]*fileEntry // branch → path → entry
-	prs               []PRRecord
-	DefaultBranchName string // defaults to "main"
-	getFileCalls      int
-	lastCommit        CommitRecord
+	mu                 sync.Mutex
+	branches           map[string]string                // branch name → tip SHA
+	files              map[string]map[string]*fileEntry // branch → path → entry
+	prs                []PRRecord
+	DefaultBranchName  string // defaults to "main"
+	getFileCalls       int
+	putFileCalls       int
+	nextGetFileErr     error
+	nextPutFileErr     error
+	putFileErrAfter    int
+	lastCommit         CommitRecord
 	AuthenticatedName  string // returned by GetAuthenticatedUser; defaults to "Test User"
 	AuthenticatedEmail string // returned by GetAuthenticatedUser; defaults to "<EMAIL_ADDRESS>"
 }
@@ -55,6 +59,36 @@ func (fc *FakeClient) GetFileCallCount() int {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	return fc.getFileCalls
+}
+
+// SetGetFileError makes the next GetFile call return err before reading any file.
+func (fc *FakeClient) SetGetFileError(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.nextGetFileErr = err
+}
+
+// SetPutFileError makes the next PutFile call return err before writing a file.
+func (fc *FakeClient) SetPutFileError(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.putFileErrAfter = 0
+	fc.nextPutFileErr = err
+}
+
+// SetPutFileErrorAfter makes PutFile return err after successfulCalls writes succeed.
+func (fc *FakeClient) SetPutFileErrorAfter(successfulCalls int, err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.putFileErrAfter = successfulCalls
+	fc.nextPutFileErr = err
+}
+
+// PutFileCallCount returns the total number of PutFile calls made so far.
+func (fc *FakeClient) PutFileCallCount() int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	return fc.putFileCalls
 }
 
 func sha256hex(b []byte) string {
@@ -105,6 +139,11 @@ func (fc *FakeClient) GetFile(_ context.Context, branch, p string) ([]byte, stri
 	defer fc.mu.Unlock()
 	fc.ensureMaps()
 	fc.getFileCalls++
+	if fc.nextGetFileErr != nil {
+		err := fc.nextGetFileErr
+		fc.nextGetFileErr = nil
+		return nil, "", err
+	}
 	bf := fc.files[branch]
 	if bf == nil {
 		return nil, "", ErrNotFound
@@ -123,6 +162,15 @@ func (fc *FakeClient) PutFile(_ context.Context, branch, p, _ string, content []
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	fc.ensureMaps()
+	fc.putFileCalls++
+	if fc.nextPutFileErr != nil {
+		if fc.putFileErrAfter == 0 {
+			err := fc.nextPutFileErr
+			fc.nextPutFileErr = nil
+			return err
+		}
+		fc.putFileErrAfter--
+	}
 	if fc.files[branch] == nil {
 		fc.files[branch] = map[string]*fileEntry{}
 	}

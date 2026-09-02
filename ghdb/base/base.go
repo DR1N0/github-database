@@ -182,9 +182,17 @@ func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath stri
 	if err != nil {
 		return err
 	}
+	type replayedSegment struct {
+		path       string
+		sha        string
+		latest     time.Time
+		hasApplied bool
+	}
 	var allRecs []MutationRecord
+	var replayed []replayedSegment
 	for _, e := range entries {
-		data, _, err := b.gh.GetFile(ctx, cfg.DeltaBranch, versionPath+"/"+e.Name)
+		path := versionPath + "/" + e.Name
+		data, _, err := b.gh.GetFile(ctx, cfg.DeltaBranch, path)
 		if err != nil {
 			b.Logger().Printf("ghdb: replay: skip %s: %v", e.Name, err)
 			continue
@@ -194,17 +202,31 @@ func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath stri
 			b.Logger().Printf("ghdb: replay: parse %s: %v", e.Name, err)
 			continue
 		}
+
+		segment := replayedSegment{path: path, sha: e.SHA}
 		for _, r := range recs {
 			if r.TS.After(tCut) {
 				allRecs = append(allRecs, r)
+				if !segment.hasApplied || r.TS.After(segment.latest) {
+					segment.latest = r.TS
+					segment.hasApplied = true
+				}
 			}
 		}
+		replayed = append(replayed, segment)
 	}
 	SortByTS(allRecs)
 	b.mu.Lock()
 	for _, r := range allRecs {
 		if b.applyFn != nil {
 			b.applyFn(r)
+		}
+	}
+	for _, segment := range replayed {
+		b.syncSHAs[segment.path] = segment.sha
+		b.syncTimes[segment.path] = tCut
+		if segment.hasApplied {
+			b.syncTimes[segment.path] = segment.latest
 		}
 	}
 	b.mu.Unlock()

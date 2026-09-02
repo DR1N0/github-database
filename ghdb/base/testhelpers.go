@@ -17,6 +17,13 @@ func EngineInstanceID(eng Engine) string {
 	return eng.(*baseDB).instanceID
 }
 
+func SetEngineInstanceID(eng Engine, instanceID string) {
+	b := eng.(*baseDB)
+	b.mu.Lock()
+	b.instanceID = instanceID
+	b.mu.Unlock()
+}
+
 func EngineWriteVer(eng Engine) int {
 	b := eng.(*baseDB)
 	b.mu.RLock()
