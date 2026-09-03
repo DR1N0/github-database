@@ -68,7 +68,7 @@ func (o *Option) Host(host string) *Option {
 	return o
 }
 
-// Logger sets the logger for online-mode startup messages. Defaults to log.Default().
+// Logger sets the logger for online-mode startup, replay, and polling messages. Defaults to log.Default().
 func (o *Option) Logger(l *log.Logger) *Option {
 	o.logger = l
 	return o

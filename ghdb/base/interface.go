@@ -47,8 +47,10 @@ type Engine interface {
 	Checkpoint(ctx context.Context) error
 	Close(ctx context.Context) error
 
-	// Wired by table/graph constructors before StartOnline is called
+	// Wired by table/graph constructors before StartOnline is called.
+	// SetApplyFn is retained for callbacks that cannot return an error.
 	SetApplyFn(fn func(MutationRecord))
+	SetApplyFnWithError(fn func(MutationRecord) error)
 	SetSnapshotFn(fn func() (map[string][]byte, error))
 
 	// SetCommitterIdentity overrides the name/email used for checkpoint commits.

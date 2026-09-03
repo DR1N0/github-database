@@ -3,7 +3,7 @@ package base
 import (
 	"context"
 	"fmt"
-	"log"
+	"sort"
 	"time"
 )
 
@@ -26,7 +26,7 @@ func (b *baseDB) startSync() {
 				return
 			case <-ticker.C:
 				if err := b.poll(context.Background()); err != nil {
-					log.Printf("ghdb: sync poll error: %v", err)
+					b.Logger().Printf("ghdb: sync poll failed")
 				}
 			}
 		}
@@ -49,7 +49,7 @@ func (b *baseDB) poll(ctx context.Context) error {
 	for _, vpath := range paths {
 		entries, err := b.gh.ListDir(ctx, b.cfg.DeltaBranch, vpath)
 		if err != nil {
-			log.Printf("ghdb: poll ListDir %s: %v", vpath, err)
+			b.Logger().Printf("ghdb: poll ListDir %s failed", vpath)
 			continue
 		}
 		for _, e := range entries {
@@ -63,36 +63,48 @@ func (b *baseDB) poll(ctx context.Context) error {
 
 			data, _, err := b.gh.GetFile(ctx, b.cfg.DeltaBranch, key)
 			if err != nil {
-				log.Printf("ghdb: poll GetFile %s: %v", key, err)
+				b.Logger().Printf("ghdb: poll GetFile %s (sha %s) failed", key, e.SHA)
 				continue
 			}
-			recs, err := UnmarshalJSONL(data)
-			if err != nil {
-				log.Printf("ghdb: poll parse %s: %v", key, err)
-				continue
+			recs, parseErrs := decodeJSONL(data)
+			for _, parseErr := range parseErrs {
+				b.Logger().Printf("ghdb: poll: skip %s (sha %s) line %d: %s", key, e.SHA, parseErr.Line, jsonlWarningCategory(parseErr))
 			}
 
 			b.mu.RLock()
 			lastApplied := b.syncTimes[key]
 			b.mu.RUnlock()
 
-			var fresh []MutationRecord
-			for _, r := range recs {
-				if r.TS.After(lastApplied) {
-					fresh = append(fresh, r)
+			var fresh []decodedMutationRecord
+			for _, decoded := range recs {
+				if decoded.record.TS.After(lastApplied) {
+					fresh = append(fresh, decoded)
 				}
 			}
-			SortByTS(fresh)
+			sort.Slice(fresh, func(i, j int) bool {
+				return fresh[i].record.TS.Before(fresh[j].record.TS)
+			})
 
 			b.mu.Lock()
-			for _, r := range fresh {
+			var latestSuccessful time.Time
+			hasSuccessful := false
+			for _, decoded := range fresh {
 				if b.applyFn != nil {
-					b.applyFn(r)
+					if err := b.applyFn(decoded.record); err != nil {
+						b.Logger().Printf("ghdb: poll: skip %s (sha %s) line %d: invalid mutation", key, e.SHA, decoded.line)
+						continue
+					}
+				}
+				if !hasSuccessful || decoded.record.TS.After(latestSuccessful) {
+					latestSuccessful = decoded.record.TS
+					hasSuccessful = true
 				}
 			}
-			if len(fresh) > 0 {
-				b.syncTimes[key] = fresh[len(fresh)-1].TS
+			if hasSuccessful {
+				b.syncTimes[key] = latestSuccessful
 			}
+			// The successfully fetched content is acknowledged even when individual
+			// lines were bad, preventing unchanged segments from warning forever.
 			b.syncSHAs[key] = e.SHA
 			b.mu.Unlock()
 		}

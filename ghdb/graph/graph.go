@@ -24,6 +24,17 @@ type vertexSet struct {
 	data  map[string]json.RawMessage
 }
 
+func validateJSONObject(value json.RawMessage, what string) error {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(value, &obj); err != nil {
+		return fmt.Errorf("ghdb: %s must be a JSON object: %w", what, err)
+	}
+	if obj == nil {
+		return fmt.Errorf("ghdb: %s must be a JSON object", what)
+	}
+	return nil
+}
+
 // New creates a GraphStore and its engine.
 func New(
 	cfg base.Config,
@@ -46,8 +57,8 @@ func New(
 		}
 		gdb.vertices[vspec.Label] = &vertexSet{db: gdb, label: vspec.Label, data: d}
 	}
-	eng.SetApplyFn(func(r base.MutationRecord) {
-		applyToGraphDB(gdb.vertices, gdb.edges, r)
+	eng.SetApplyFnWithError(func(r base.MutationRecord) error {
+		return applyToGraphDB(gdb.vertices, gdb.edges, r)
 	})
 	eng.SetSnapshotFn(func() (map[string][]byte, error) {
 		files := map[string][]byte{}
@@ -179,8 +190,8 @@ func (db *graphDB) AddEdge(label, from, to string) error {
 // props must be nil or a valid JSON object; a non-object value is rejected.
 func (db *graphDB) SetEdge(label, from, to string, props json.RawMessage) error {
 	if props != nil {
-		if err := json.Unmarshal(props, &map[string]json.RawMessage{}); err != nil {
-			return fmt.Errorf("ghdb: SetEdge props must be a JSON object or nil: %w", err)
+		if err := validateJSONObject(props, "SetEdge props"); err != nil {
+			return err
 		}
 	}
 	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set_edge", From: from, Label: label, To: to, Value: props}
@@ -379,6 +390,9 @@ func (vs *vertexSet) Get(id string) (json.RawMessage, bool) {
 
 // Set writes value under id and buffers a mutation record.
 func (vs *vertexSet) Set(id string, value json.RawMessage) error {
+	if err := validateJSONObject(value, "vertex value"); err != nil {
+		return err
+	}
 	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set_vertex", Label: vs.label, ID: id, Value: value}
 	if err := vs.db.eng.ValidateMutation(record); err != nil {
 		return err
@@ -465,50 +479,54 @@ func (vs *vertexSet) All() map[string]json.RawMessage {
 }
 
 // applyToGraphDB replays a MutationRecord onto the graph stores and edge maps (called under mu.Lock).
-func applyToGraphDB(vertices map[string]*vertexSet, edges map[string]map[string]map[string]json.RawMessage, r base.MutationRecord) {
+// It validates each semantic mutation before allocation or mutation. Edge labels
+// intentionally remain dynamic: remote data can use labels absent from the baseline.
+func applyToGraphDB(vertices map[string]*vertexSet, edges map[string]map[string]map[string]json.RawMessage, r base.MutationRecord) error {
 	switch r.Op {
 	case "set_vertex":
-		if vs, ok := vertices[r.Label]; ok {
-			vs.data[r.ID] = r.Value
+		vs, ok := vertices[r.Label]
+		if !ok {
+			return fmt.Errorf("ghdb: unknown vertex label %q", r.Label)
 		}
+		if err := validateJSONObject(r.Value, "vertex value"); err != nil {
+			return err
+		}
+		vs.data[r.ID] = r.Value
 	case "patch_vertex":
-		if vs, ok := vertices[r.Label]; ok {
-			merged, err := base.JSONMerge(vs.data[r.ID], r.Fields)
-			if err == nil {
-				vs.data[r.ID] = merged
+		vs, ok := vertices[r.Label]
+		if !ok {
+			return fmt.Errorf("ghdb: unknown vertex label %q", r.Label)
+		}
+		merged, err := base.JSONMerge(vs.data[r.ID], r.Fields)
+		if err != nil {
+			return fmt.Errorf("ghdb: patch vertex %s/%s: %w", r.Label, r.ID, err)
+		}
+		vs.data[r.ID] = merged
+	case "delete_vertex":
+		vs, ok := vertices[r.Label]
+		if !ok {
+			return fmt.Errorf("ghdb: unknown vertex label %q", r.Label)
+		}
+		delete(vs.data, r.ID)
+	case "add_edge":
+		ensureEdge(edges, r.Label, r.From)[r.To] = nil
+	case "set_edge":
+		if r.Value != nil {
+			if err := validateJSONObject(r.Value, "edge properties"); err != nil {
+				return err
 			}
 		}
-	case "delete_vertex":
-		if vs, ok := vertices[r.Label]; ok {
-			delete(vs.data, r.ID)
-		}
-	case "add_edge":
-		if edges[r.Label] == nil {
-			edges[r.Label] = map[string]map[string]json.RawMessage{}
-		}
-		if edges[r.Label][r.From] == nil {
-			edges[r.Label][r.From] = map[string]json.RawMessage{}
-		}
-		edges[r.Label][r.From][r.To] = nil
-	case "set_edge":
-		if edges[r.Label] == nil {
-			edges[r.Label] = map[string]map[string]json.RawMessage{}
-		}
-		if edges[r.Label][r.From] == nil {
-			edges[r.Label][r.From] = map[string]json.RawMessage{}
-		}
-		edges[r.Label][r.From][r.To] = r.Value
+		ensureEdge(edges, r.Label, r.From)[r.To] = r.Value
 	case "patch_edge":
-		if edges[r.Label] == nil {
-			edges[r.Label] = map[string]map[string]json.RawMessage{}
+		var existing json.RawMessage
+		if edges[r.Label] != nil && edges[r.Label][r.From] != nil {
+			existing = edges[r.Label][r.From][r.To]
 		}
-		if edges[r.Label][r.From] == nil {
-			edges[r.Label][r.From] = map[string]json.RawMessage{}
+		merged, err := base.JSONMerge(existing, r.Fields)
+		if err != nil {
+			return fmt.Errorf("ghdb: patch edge %s %s→%s: %w", r.Label, r.From, r.To, err)
 		}
-		merged, err := base.JSONMerge(edges[r.Label][r.From][r.To], r.Fields)
-		if err == nil {
-			edges[r.Label][r.From][r.To] = merged
-		}
+		ensureEdge(edges, r.Label, r.From)[r.To] = merged
 	case "remove_edge", "delete_edge":
 		if edges[r.Label] != nil && edges[r.Label][r.From] != nil {
 			delete(edges[r.Label][r.From], r.To)
@@ -519,5 +537,19 @@ func applyToGraphDB(vertices map[string]*vertexSet, edges map[string]map[string]
 				delete(edges, r.Label)
 			}
 		}
+	default:
+		return fmt.Errorf("ghdb: unknown graph mutation %q", r.Op)
 	}
+	return nil
+}
+
+// ensureEdge initializes the dynamic edge-label and source maps after validation.
+func ensureEdge(edges map[string]map[string]map[string]json.RawMessage, label, from string) map[string]json.RawMessage {
+	if edges[label] == nil {
+		edges[label] = map[string]map[string]json.RawMessage{}
+	}
+	if edges[label][from] == nil {
+		edges[label][from] = map[string]json.RawMessage{}
+	}
+	return edges[label][from]
 }

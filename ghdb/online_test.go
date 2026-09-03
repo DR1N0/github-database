@@ -1,10 +1,12 @@
 package ghdb_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -80,6 +82,145 @@ func TestOpenOnlineReplay(t *testing.T) {
 		t.Errorf("replay: got %q ok=%v", v, ok)
 	}
 	db.Close(context.Background())
+}
+
+func TestOnlineReplayAndPollSkipCorruptSegments(t *testing.T) {
+	fc, baseline := newOnlineFake(t)
+	const path = "testdb/v1/corrupt.jsonl"
+	at := func(second int, table, key string) ghdb.MutationRecord {
+		return ghdb.MutationRecord{
+			TS:    time.Date(2026, 9, 3, 0, 0, second, 0, time.UTC),
+			Op:    "set",
+			Table: table,
+			Key:   key,
+			Value: json.RawMessage(`{"id":"` + key + `"}`),
+		}
+	}
+	jsonLine := func(record ghdb.MutationRecord) []byte {
+		t.Helper()
+		line, err := ghdb.MarshalJSONL([]ghdb.MutationRecord{record})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return line
+	}
+
+	// Valid records surround malformed JSONL and an otherwise decodable mutation
+	// that cannot be applied because its table is absent from the baseline.
+	segment := bytes.Join([][]byte{
+		jsonLine(at(1, "things", "before-json-error")),
+		[]byte(`{"ts":` + "\n"),
+		jsonLine(at(3, "things", "between-json-errors")),
+		[]byte("not JSON\n"),
+		jsonLine(at(5, "unknown-table", "semantic-error")),
+		jsonLine(at(6, "things", "after-semantic-error")),
+	}, nil)
+	if err := fc.PutFile(context.Background(), "ghdb-data", path, "seed corrupt segment", segment, ""); err != nil {
+		t.Fatal(err)
+	}
+	_, initialSHA, err := fc.GetFile(context.Background(), "ghdb-data", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var logOutput bytes.Buffer
+	db, err := ghdb.OpenWithClientAndLogger(baseline, fc, log.New(&logOutput, "", 0))
+	if err != nil {
+		t.Fatalf("OpenWithClientAndLogger: %v", err)
+	}
+	defer db.Close(context.Background())
+	table := db.(ghdb.TableDB).Table("things")
+	for _, key := range []string{"before-json-error", "between-json-errors", "after-semantic-error"} {
+		if _, ok := table.Get(key); !ok {
+			t.Errorf("startup replay did not apply valid record %q", key)
+		}
+	}
+	if _, ok := table.Get("semantic-error"); ok {
+		t.Error("semantic-invalid record must not be applied")
+	}
+
+	assertWarnings := func(logs, sha string, wantLines []int) {
+		t.Helper()
+		warnings := 0
+		for _, message := range strings.Split(strings.TrimSpace(logs), "\n") {
+			if !strings.Contains(message, path) {
+				continue
+			}
+			warnings++
+			if !strings.Contains(message, sha) {
+				t.Errorf("warning %q does not contain segment SHA %q", message, sha)
+			}
+		}
+		if warnings != len(wantLines) {
+			t.Errorf("corrupt segment warnings = %d, want %d; logs:\n%s", warnings, len(wantLines), logs)
+		}
+		for _, line := range wantLines {
+			lineNeedle := fmt.Sprintf("line %d", line)
+			found := false
+			for _, message := range strings.Split(strings.TrimSpace(logs), "\n") {
+				if strings.Contains(message, path) && strings.Contains(message, sha) && strings.Contains(message, lineNeedle) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("warning logs do not contain path %q, SHA %q, and %q together; logs:\n%s", path, sha, lineNeedle, logs)
+			}
+		}
+	}
+	startupLogs := logOutput.String()
+	assertWarnings(startupLogs, initialSHA, []int{2, 4, 5})
+	if !strings.Contains(startupLogs, "line 5: invalid mutation") {
+		t.Errorf("semantic mutation warning must use the invalid mutation category; logs:\n%s", startupLogs)
+	}
+	for _, sensitive := range []string{"unknown-table", "semantic-error", "not JSON", `{"ts":`} {
+		if strings.Contains(startupLogs, sensitive) {
+			t.Errorf("warning logs must not expose corrupt mutation data %q; logs:\n%s", sensitive, startupLogs)
+		}
+	}
+
+	callsBeforeUnchangedPoll := fc.GetFileCallCount()
+	if err := ghdb.Poll(db, context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fc.GetFileCallCount(); got != callsBeforeUnchangedPoll {
+		t.Fatalf("GetFile calls after unchanged poll = %d, want %d", got, callsBeforeUnchangedPoll)
+	}
+	if got := logOutput.String(); got != startupLogs {
+		t.Fatalf("unchanged acknowledged segment emitted warnings again; logs:\n%s", got)
+	}
+
+	updated := append(append([]byte(nil), segment...), jsonLine(at(7, "things", "after-revision"))...)
+	if err := fc.PutFile(context.Background(), "ghdb-data", path, "append later valid record", updated, initialSHA); err != nil {
+		t.Fatal(err)
+	}
+	_, updatedSHA, err := fc.GetFile(context.Background(), "ghdb-data", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callsBeforeChangedPoll := fc.GetFileCallCount()
+	if err := ghdb.Poll(db, context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fc.GetFileCallCount(); got != callsBeforeChangedPoll+1 {
+		t.Fatalf("GetFile calls after changed poll = %d, want %d", got, callsBeforeChangedPoll+1)
+	}
+	if _, ok := table.Get("after-revision"); !ok {
+		t.Error("changed segment's later valid record was not applied")
+	}
+	changedLogs := logOutput.String()
+	assertWarnings(changedLogs[len(startupLogs):], updatedSHA, []int{2, 4})
+
+	callsBeforeSecondUnchangedPoll := fc.GetFileCallCount()
+	if err := ghdb.Poll(db, context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fc.GetFileCallCount(); got != callsBeforeSecondUnchangedPoll {
+		t.Fatalf("GetFile calls after second unchanged poll = %d, want %d", got, callsBeforeSecondUnchangedPoll)
+	}
+	if got := logOutput.String(); got != changedLogs {
+		t.Fatalf("changed segment emitted warnings again after its SHA was acknowledged; logs:\n%s", got)
+	}
 }
 
 func TestOpenOnlineSegmentReplayAndPoll(t *testing.T) {

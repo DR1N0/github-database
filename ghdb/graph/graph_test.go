@@ -97,6 +97,31 @@ func makeGraphDB(t *testing.T) *graphDB {
 	return newGraphDB(cfg, verts, edges)
 }
 
+func TestApplyToGraphDBValidatesMutationsAndKeepsDynamicEdgeLabels(t *testing.T) {
+	db := makeGraphDB(t)
+	if err := applyToGraphDB(db.vertices, db.edges, base.MutationRecord{
+		Op: "set_vertex", Label: "missing", ID: "x", Value: json.RawMessage(`{"id":"x"}`),
+	}); err == nil {
+		t.Fatal("unknown vertex label was accepted")
+	}
+	if err := applyToGraphDB(db.vertices, db.edges, base.MutationRecord{
+		Op: "set_edge", Label: "new-label", From: "a", To: "b", Value: json.RawMessage(`[]`),
+	}); err == nil {
+		t.Fatal("non-object edge properties were accepted")
+	}
+	if _, ok := db.GetEdge("new-label", "a", "b"); ok {
+		t.Fatal("invalid edge mutation changed graph state")
+	}
+	if err := applyToGraphDB(db.vertices, db.edges, base.MutationRecord{
+		Op: "add_edge", Label: "new-label", From: "a", To: "b",
+	}); err != nil {
+		t.Fatalf("dynamic edge label was rejected: %v", err)
+	}
+	if _, ok := db.GetEdge("new-label", "a", "b"); !ok {
+		t.Fatal("dynamic edge label was not applied")
+	}
+}
+
 func TestVertexStoreGet(t *testing.T) {
 	db := makeGraphDB(t)
 	rec, ok := db.Vertex("component").Get("svc-a")

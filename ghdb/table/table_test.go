@@ -63,6 +63,25 @@ func makeTableDB(t *testing.T) *tableDB {
 	return newTableDB(cfg, data)
 }
 
+func TestApplyToTableDBRejectsInvalidMutationBeforeStateChange(t *testing.T) {
+	db := makeTableDB(t)
+	before := string(db.tables["components"].data["svc-a"])
+
+	err := applyToTableDB(db.tables, base.MutationRecord{
+		Op: "set", Table: "components", Key: "svc-a", Value: json.RawMessage(`{"name":"other"}`),
+	})
+	if !errors.Is(err, ErrKeyMismatch) {
+		t.Fatalf("apply invalid set error = %v, want ErrKeyMismatch", err)
+	}
+	if got := string(db.tables["components"].data["svc-a"]); got != before {
+		t.Fatalf("row changed after rejected set: got %s, want %s", got, before)
+	}
+
+	if err := applyToTableDB(db.tables, base.MutationRecord{Op: "unknown", Table: "components"}); err == nil {
+		t.Fatal("unknown mutation was accepted")
+	}
+}
+
 func TestTableGet(t *testing.T) {
 	db := makeTableDB(t)
 	rec, ok := db.Table("components").Get("svc-a")

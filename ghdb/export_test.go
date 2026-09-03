@@ -4,6 +4,7 @@ package ghdb
 import (
 	"context"
 	"io/fs"
+	"log"
 
 	"github.com/DR1N0/github-database/ghdb/base"
 	"github.com/DR1N0/github-database/ghdb/github"
@@ -26,6 +27,9 @@ var (
 	// OpenWithClient injects a pre-built GitHub client, bypassing token auth. For tests only.
 	OpenWithClient = func(baseline fs.FS, gh github.Interface) (DB, error) {
 		return NewOption(baseline).withClient(gh).Open()
+	}
+	OpenWithClientAndLogger = func(baseline fs.FS, gh github.Interface, logger *log.Logger) (DB, error) {
+		return NewOption(baseline).Logger(logger).withClient(gh).Open()
 	}
 
 	MarshalJSONL   = base.MarshalJSONL
@@ -60,6 +64,9 @@ var (
 	}
 	SetApplyFn = func(db DB, fn func(MutationRecord)) {
 		engineOf(db).SetApplyFn(fn)
+	}
+	SetApplyFnWithError = func(db DB, fn func(MutationRecord) error) {
+		engineOf(db).SetApplyFnWithError(fn)
 	}
 
 	OpenWithClientAndSigner = func(baseline fs.FS, gh github.Interface, signer func([]byte) (string, error)) (DB, error) {

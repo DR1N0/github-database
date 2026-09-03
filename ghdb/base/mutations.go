@@ -1,9 +1,9 @@
 package base
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"time"
 )
@@ -34,22 +34,81 @@ func MarshalJSONL(recs []MutationRecord) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func UnmarshalJSONL(data []byte) ([]MutationRecord, error) {
-	var recs []MutationRecord
-	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
+// JSONLLineError identifies a malformed JSONL source line.
+// Line is one-based and includes blank lines.
+type JSONLLineError struct {
+	Line int
+	Err  error
+
+	oversized bool
+}
+
+func (e *JSONLLineError) Error() string {
+	return fmt.Sprintf("ghdb: JSONL line %d: %v", e.Line, e.Err)
+}
+
+func (e *JSONLLineError) Unwrap() error { return e.Err }
+
+func jsonlWarningCategory(e *JSONLLineError) string {
+	if e.oversized {
+		return "exceeds 32 MiB individual-line limit"
+	}
+	return "malformed JSONL record"
+}
+
+type decodedMutationRecord struct {
+	record MutationRecord
+	line   int
+}
+
+// decodeJSONL parses records line-by-line. Unlike UnmarshalJSONL, it retains
+// source-line information and reports malformed lines without stopping.
+func decodeJSONL(data []byte) ([]decodedMutationRecord, []*JSONLLineError) {
+	var recs []decodedMutationRecord
+	var errs []*JSONLLineError
+	for lineNumber, remaining := 1, data; len(remaining) > 0; lineNumber++ {
+		line := remaining
+		if newline := bytes.IndexByte(remaining, '\n'); newline >= 0 {
+			line = remaining[:newline]
+			remaining = remaining[newline+1:]
+		} else {
+			remaining = nil
+		}
+
+		if len(line) > MaxSingleMutationBytes {
+			errs = append(errs, &JSONLLineError{
+				Line:      lineNumber,
+				Err:       fmt.Errorf("line exceeds %d byte limit", MaxSingleMutationBytes),
+				oversized: true,
+			})
+			continue
+		}
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
 		}
 		var r MutationRecord
 		if err := json.Unmarshal(line, &r); err != nil {
-			return nil, err
+			errs = append(errs, &JSONLLineError{Line: lineNumber, Err: err})
+			continue
 		}
-		recs = append(recs, r)
+		recs = append(recs, decodedMutationRecord{record: r, line: lineNumber})
 	}
-	return recs, sc.Err()
+	return recs, errs
+}
+
+// UnmarshalJSONL strictly decodes JSONL. It returns the first malformed or
+// oversized line rather than omitting it. Valid lines up to 32 MiB are accepted.
+func UnmarshalJSONL(data []byte) ([]MutationRecord, error) {
+	decoded, errs := decodeJSONL(data)
+	if len(errs) > 0 {
+		return nil, errs[0]
+	}
+	var recs []MutationRecord
+	for _, decoded := range decoded {
+		recs = append(recs, decoded.record)
+	}
+	return recs, nil
 }
 
 // SortByTS sorts mutation records in ascending timestamp order in place.

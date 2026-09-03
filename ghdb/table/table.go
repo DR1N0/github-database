@@ -40,7 +40,7 @@ func New(cfg base.Config, data map[string]map[string]json.RawMessage) (TableDB, 
 		}
 		tdb.tables[spec.Name] = &table{eng: eng, spec: spec, data: d}
 	}
-	eng.SetApplyFn(func(r base.MutationRecord) { applyToTableDB(tdb.tables, r) })
+	eng.SetApplyFnWithError(func(r base.MutationRecord) error { return applyToTableDB(tdb.tables, r) })
 	eng.SetSnapshotFn(func() (map[string][]byte, error) {
 		files := make(map[string][]byte, len(tdb.tables))
 		for name, tbl := range tdb.tables {
@@ -121,6 +121,22 @@ func (t *table) validateRequired(row map[string]json.RawMessage) error {
 	return nil
 }
 
+// validateSetValue verifies that a set mutation is a JSON object that is valid
+// for this table. It performs no mutation, so replay can safely reject it.
+func (t *table) validateSetValue(key string, value json.RawMessage) error {
+	var row map[string]json.RawMessage
+	if err := json.Unmarshal(value, &row); err != nil {
+		return fmt.Errorf("ghdb: invalid JSON: %w", err)
+	}
+	if row == nil {
+		return errors.New("ghdb: value must be a JSON object")
+	}
+	if err := t.validateKeyField(key, row, true); err != nil {
+		return err
+	}
+	return t.validateRequired(row)
+}
+
 // Get returns the raw JSON value for key, and whether it exists.
 func (t *table) Get(key string) (json.RawMessage, bool) {
 	t.eng.RLockData()
@@ -132,14 +148,7 @@ func (t *table) Get(key string) (json.RawMessage, bool) {
 // Set writes value under key and buffers a mutation record.
 // Returns ErrKeyMismatch if the value's key field does not match key.
 func (t *table) Set(key string, value json.RawMessage) error {
-	var row map[string]json.RawMessage
-	if err := json.Unmarshal(value, &row); err != nil {
-		return fmt.Errorf("ghdb: invalid JSON: %w", err)
-	}
-	if err := t.validateKeyField(key, row, true); err != nil {
-		return err
-	}
-	if err := t.validateRequired(row); err != nil {
+	if err := t.validateSetValue(key, value); err != nil {
 		return err
 	}
 	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set", Table: t.spec.Name, Key: key, Value: value}
@@ -209,22 +218,34 @@ func (t *table) All() map[string]json.RawMessage {
 }
 
 // applyToTableDB replays a MutationRecord onto the tables map (called under mu.Lock by the engine).
-func applyToTableDB(tables map[string]*table, r base.MutationRecord) {
+// It validates the complete mutation before changing state so a bad remote record
+// can be reported and skipped without corrupting the in-memory table.
+func applyToTableDB(tables map[string]*table, r base.MutationRecord) error {
 	tbl, ok := tables[r.Table]
 	if !ok {
-		return
+		return fmt.Errorf("ghdb: unknown table %q", r.Table)
 	}
 	switch r.Op {
 	case "set":
+		if err := tbl.validateSetValue(r.Key, r.Value); err != nil {
+			return err
+		}
 		tbl.data[r.Key] = r.Value
 	case "patch":
-		merged, err := base.JSONMerge(tbl.data[r.Key], r.Fields)
-		if err == nil {
-			tbl.data[r.Key] = merged
+		if err := tbl.validateKeyField(r.Key, r.Fields, false); err != nil {
+			return err
 		}
+		merged, err := base.JSONMerge(tbl.data[r.Key], r.Fields)
+		if err != nil {
+			return fmt.Errorf("ghdb: patch %s/%s: %w", r.Table, r.Key, err)
+		}
+		tbl.data[r.Key] = merged
 	case "delete":
 		delete(tbl.data, r.Key)
+	default:
+		return fmt.Errorf("ghdb: unknown table mutation %q", r.Op)
 	}
+	return nil
 }
 
 // newTableDB is a test helper that returns the concrete *tableDB.

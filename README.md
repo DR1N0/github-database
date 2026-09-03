@@ -128,6 +128,8 @@ Checkpoint commits a full snapshot of current state to the repository in a singl
 
 In online mode, each pod writes bounded JSONL delta segments and rolls over to a new segment when its configured byte or record cap is reached. A fixed, non-configurable 32 MiB ceiling applies to each mutation: records above normal segment limits but at or below that ceiling are stored in immutable one-record segments, while larger changes fail at the caller API with `change is too large` and leave local state unchanged. Before deploying this version, operators must restore any already-truncated delta logs from Git history or verified backups.
 
+Malformed or semantically invalid remote JSONL records are skipped so other records in the segment can still replay. Configure `Option.Logger` to receive a warning for each skipped record, including its segment path, line number, and SHA; a fetched segment revision is acknowledged, so unchanged corruption is not fetched or warned about again.
+
 ## Run the example
 
 ```bash

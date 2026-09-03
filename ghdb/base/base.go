@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -103,7 +104,7 @@ type baseDB struct {
 	nextVerExists bool
 
 	// Set by table/graph constructors before StartOnline is called.
-	applyFn    func(MutationRecord)
+	applyFn    func(MutationRecord) error
 	snapshotFn func() (map[string][]byte, error)
 
 	// Committer identity for checkpoint commits. Set during StartOnline.
@@ -164,7 +165,23 @@ func (b *baseDB) Logger() *log.Logger {
 	return log.Default()
 }
 
-func (b *baseDB) SetApplyFn(fn func(MutationRecord))                 { b.applyFn = fn }
+// SetApplyFn configures a replay callback that cannot report failures.
+// New callers should use SetApplyFnWithError so replay can warn and continue.
+func (b *baseDB) SetApplyFn(fn func(MutationRecord)) {
+	if fn == nil {
+		b.applyFn = nil
+		return
+	}
+	b.applyFn = func(r MutationRecord) error {
+		fn(r)
+		return nil
+	}
+}
+
+// SetApplyFnWithError configures a replay callback that can reject a mutation
+// without interrupting the remainder of a fetched segment.
+func (b *baseDB) SetApplyFnWithError(fn func(MutationRecord) error) { b.applyFn = fn }
+
 func (b *baseDB) SetSnapshotFn(fn func() (map[string][]byte, error)) { b.snapshotFn = fn }
 
 func (b *baseDB) SetCommitterIdentity(name, email string) {
@@ -196,57 +213,69 @@ func (b *baseDB) Close(ctx context.Context) error {
 }
 
 // replayVersion fetches all JSONL files in versionPath, filters records after tCut,
-// sorts by timestamp, and applies them via applyFn.
+// sorts by timestamp, and applies them via applyFn. A fetched segment is acknowledged
+// even when individual records cannot be parsed or applied, so an unchanged bad SHA
+// does not produce the same warnings on every poll.
 func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath string, tCut time.Time) error {
 	entries, err := b.gh.ListDir(ctx, cfg.DeltaBranch, versionPath)
 	if err != nil {
 		return err
 	}
 	type replayedSegment struct {
-		path       string
-		sha        string
-		latest     time.Time
-		hasApplied bool
+		path string
+		sha  string
 	}
-	var allRecs []MutationRecord
+	type replayedRecord struct {
+		record MutationRecord
+		path   string
+		sha    string
+		line   int
+	}
+	var allRecs []replayedRecord
 	var replayed []replayedSegment
 	for _, e := range entries {
 		path := versionPath + "/" + e.Name
 		data, _, err := b.gh.GetFile(ctx, cfg.DeltaBranch, path)
 		if err != nil {
-			b.Logger().Printf("ghdb: replay: skip %s: %v", e.Name, err)
-			continue
-		}
-		recs, err := UnmarshalJSONL(data)
-		if err != nil {
-			b.Logger().Printf("ghdb: replay: parse %s: %v", e.Name, err)
+			b.Logger().Printf("ghdb: replay: skip %s (sha %s): GetFile failed", path, e.SHA)
 			continue
 		}
 
 		segment := replayedSegment{path: path, sha: e.SHA}
-		for _, r := range recs {
-			if r.TS.After(tCut) {
-				allRecs = append(allRecs, r)
-				if !segment.hasApplied || r.TS.After(segment.latest) {
-					segment.latest = r.TS
-					segment.hasApplied = true
-				}
+		recs, parseErrs := decodeJSONL(data)
+		for _, parseErr := range parseErrs {
+			b.Logger().Printf("ghdb: replay: skip %s (sha %s) line %d: %s", path, e.SHA, parseErr.Line, jsonlWarningCategory(parseErr))
+		}
+		for _, decoded := range recs {
+			if decoded.record.TS.After(tCut) {
+				allRecs = append(allRecs, replayedRecord{record: decoded.record, path: path, sha: e.SHA, line: decoded.line})
 			}
 		}
 		replayed = append(replayed, segment)
 	}
-	SortByTS(allRecs)
+	sort.Slice(allRecs, func(i, j int) bool {
+		return allRecs[i].record.TS.Before(allRecs[j].record.TS)
+	})
 	b.mu.Lock()
-	for _, r := range allRecs {
+	latestSuccessful := make(map[string]time.Time)
+	hasSuccessful := make(map[string]bool)
+	for _, replayedRecord := range allRecs {
 		if b.applyFn != nil {
-			b.applyFn(r)
+			if err := b.applyFn(replayedRecord.record); err != nil {
+				b.Logger().Printf("ghdb: replay: skip %s (sha %s) line %d: invalid mutation", replayedRecord.path, replayedRecord.sha, replayedRecord.line)
+				continue
+			}
+		}
+		if !hasSuccessful[replayedRecord.path] || replayedRecord.record.TS.After(latestSuccessful[replayedRecord.path]) {
+			latestSuccessful[replayedRecord.path] = replayedRecord.record.TS
+			hasSuccessful[replayedRecord.path] = true
 		}
 	}
 	for _, segment := range replayed {
 		b.syncSHAs[segment.path] = segment.sha
 		b.syncTimes[segment.path] = tCut
-		if segment.hasApplied {
-			b.syncTimes[segment.path] = segment.latest
+		if hasSuccessful[segment.path] {
+			b.syncTimes[segment.path] = latestSuccessful[segment.path]
 		}
 	}
 	b.mu.Unlock()
