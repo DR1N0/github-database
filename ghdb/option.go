@@ -1,10 +1,12 @@
 package ghdb
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
+	"time"
 
 	"github.com/DR1N0/github-database/ghdb/base"
 	"github.com/DR1N0/github-database/ghdb/github"
@@ -14,15 +16,17 @@ import (
 
 // Option is the entry point for opening a ghdb database.
 type Option struct {
-	baseline        fs.FS
-	tokenFn         func() string
-	host            string // GitHub host; defaults to "github.com"
-	offlineFallback bool
-	logger          *log.Logger
-	client          github.Interface // non-nil only in tests
-	committerName   string
-	committerEmail  string
-	commitSigner    func([]byte) (string, error)
+	baseline             fs.FS
+	tokenFn              func() string
+	host                 string // GitHub host; defaults to "github.com"
+	offlineFallback      bool
+	logger               *log.Logger
+	client               github.Interface // non-nil only in tests
+	committerName        string
+	committerEmail       string
+	commitSigner         func([]byte) (string, error)
+	startupProgress      base.StartupProgressFunc
+	githubRequestTimeout time.Duration
 }
 
 // NewOption creates an Option rooted at baseline (an fs.FS holding db_meta.json and data files).
@@ -37,9 +41,10 @@ func (o *Option) Token(fn func() string) *Option {
 	return o
 }
 
-// AllowOfflineFallback makes Open() return an offline DB instead of an error
-// when StartOnline fails (e.g. bad credentials, GitHub unreachable).
-// The returned DB will have IsOnline() == false and Checkpoint() will return ErrOffline.
+// AllowOfflineFallback makes Open(ctx) return an offline DB instead of an error
+// when online startup fails (e.g. bad credentials, GitHub unreachable). It never
+// absorbs context cancellation or deadline errors. The returned DB will have
+// IsOnline() == false and Checkpoint() will return ErrOffline.
 func (o *Option) AllowOfflineFallback() *Option {
 	o.offlineFallback = true
 	return o
@@ -74,6 +79,21 @@ func (o *Option) Logger(l *log.Logger) *Option {
 	return o
 }
 
+// StartupProgress sets the callback for synchronous online startup progress notifications.
+// Callbacks are serialized and run outside data locks; keep them short and do not
+// re-enter startup from a callback.
+func (o *Option) StartupProgress(fn StartupProgressFunc) *Option {
+	o.startupProgress = fn
+	return o
+}
+
+// GitHubRequestTimeout sets the timeout for each GitHub HTTP request during online operation.
+// Non-positive values use the default timeout.
+func (o *Option) GitHubRequestTimeout(timeout time.Duration) *Option {
+	o.githubRequestTimeout = timeout
+	return o
+}
+
 // withClient injects a pre-built GitHub client, bypassing token-based construction.
 // Used exclusively in tests via export_test.go.
 func (o *Option) withClient(gh github.Interface) *Option {
@@ -83,8 +103,8 @@ func (o *Option) withClient(gh github.Interface) *Option {
 
 // OpenTable opens a table-mode database and returns it as a TableDB.
 // Returns an error if db_meta.json declares a different mode.
-func (o *Option) OpenTable() (TableDB, error) {
-	db, err := o.Open()
+func (o *Option) OpenTable(ctx context.Context) (TableDB, error) {
+	db, err := o.Open(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -97,8 +117,8 @@ func (o *Option) OpenTable() (TableDB, error) {
 
 // OpenGraph opens a graph-mode database and returns it as a GraphDB.
 // Returns an error if db_meta.json declares a different mode.
-func (o *Option) OpenGraph() (GraphDB, error) {
-	db, err := o.Open()
+func (o *Option) OpenGraph(ctx context.Context) (GraphDB, error) {
+	db, err := o.Open(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -109,9 +129,13 @@ func (o *Option) OpenGraph() (GraphDB, error) {
 	return gdb, nil
 }
 
-// Open opens the database and returns the base DB interface.
-// Use OpenTable or OpenGraph when the mode is known at compile time.
-func (o *Option) Open() (DB, error) {
+// Open opens the database with ctx and returns the base DB interface.
+// Use OpenTable or OpenGraph when the mode is known at compile time. ctx controls
+// online startup only; cancellation and deadline errors are returned directly.
+func (o *Option) Open(ctx context.Context) (DB, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	cfg, db, eng, err := parseAndLoad(o.baseline)
 	if err != nil {
 		return nil, err
@@ -128,6 +152,9 @@ func (o *Option) Open() (DB, error) {
 	}
 	eng.SetCommitSigner(o.commitSigner)
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	gh := o.client
 	if gh == nil {
 		var token string
@@ -137,10 +164,19 @@ func (o *Option) Open() (DB, error) {
 		if token == "" {
 			return db, nil
 		}
-		gh = github.NewGitHubClient(cfg.GitHubRepo, token, o.host)
+		gh = github.NewGitHubClient(cfg.GitHubRepo, token, o.host, o.githubRequestTimeout)
 	}
 
-	if err := eng.StartOnline(gh); err != nil {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := eng.StartOnline(ctx, gh, o.startupProgress); err != nil {
+		// Only the caller's context determines whether fallback is forbidden. A
+		// per-request http.Client timeout can also wrap context.DeadlineExceeded,
+		// but it is an ordinary online-startup failure while ctx remains active.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if o.offlineFallback {
 			eng.Logger().Printf("ghdb: StartOnline failed (%v); falling back to offline mode", err)
 			return db, nil
@@ -206,6 +242,15 @@ type EdgeSpec = base.EdgeSpec
 type GraphSchema = graph.GraphSchema
 type DB = base.DB
 type MutationRecord = base.MutationRecord
+type StartupProgressKind = base.StartupProgressKind
+type StartupProgress = base.StartupProgress
+type StartupProgressFunc = base.StartupProgressFunc
+
+const (
+	StartupBranchLookup  = base.StartupBranchLookup
+	StartupReplayListing = base.StartupReplayListing
+	StartupReplaySegment = base.StartupReplaySegment
+)
 
 type TableDB = table.TableDB
 type Table = table.Table

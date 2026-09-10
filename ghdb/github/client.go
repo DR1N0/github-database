@@ -16,6 +16,9 @@ import (
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("ghdb: not found")
 
+// DefaultRequestTimeout is the timeout used for each GitHub HTTP request.
+const DefaultRequestTimeout = 30 * time.Second
+
 type DirEntry struct {
 	Name string
 	SHA  string
@@ -31,7 +34,8 @@ type httpClient struct {
 // NewGitHubClient creates a GitHub API client.
 // host defaults to "github.com" when empty.
 // github.com uses https://api.github.com; any other host uses https://{host}/api/v3 (GHE).
-func NewGitHubClient(repo, token, host string) Interface {
+// Non-positive timeout values use DefaultRequestTimeout.
+func NewGitHubClient(repo, token, host string, timeout time.Duration) Interface {
 	if host == "" {
 		host = "github.com"
 	}
@@ -46,7 +50,7 @@ func NewGitHubClient(repo, token, host string) Interface {
 		token:   token,
 		baseURL: baseURL,
 		hc: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: resolveRequestTimeout(timeout),
 			// Do not follow redirects — a redirect means the host requires
 			// browser-based auth (e.g. SAML SSO) and is unreachable via token alone.
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -54,6 +58,13 @@ func NewGitHubClient(repo, token, host string) Interface {
 			},
 		},
 	}
+}
+
+func resolveRequestTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return DefaultRequestTimeout
+	}
+	return timeout
 }
 
 // apiURL returns the full API URL for a repo path.

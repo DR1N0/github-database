@@ -39,19 +39,20 @@ type fileEntry struct {
 
 // FakeClient is an in-memory implementation of Interface for use in tests.
 type FakeClient struct {
-	mu                 sync.Mutex
-	branches           map[string]string                // branch name → tip SHA
-	files              map[string]map[string]*fileEntry // branch → path → entry
-	prs                []PRRecord
-	DefaultBranchName  string // defaults to "main"
-	getFileCalls       int
-	putFileCalls       int
-	nextGetFileErr     error
-	nextPutFileErr     error
-	putFileErrAfter    int
-	lastCommit         CommitRecord
-	AuthenticatedName  string // returned by GetAuthenticatedUser; defaults to "Test User"
-	AuthenticatedEmail string // returned by GetAuthenticatedUser; defaults to "<EMAIL_ADDRESS>"
+	mu                  sync.Mutex
+	branches            map[string]string                // branch name → tip SHA
+	files               map[string]map[string]*fileEntry // branch → path → entry
+	prs                 []PRRecord
+	DefaultBranchName   string // defaults to "main"
+	getFileCalls        int
+	putFileCalls        int
+	nextGetFileErr      error
+	nextBranchExistsErr error
+	nextPutFileErr      error
+	putFileErrAfter     int
+	lastCommit          CommitRecord
+	AuthenticatedName   string // returned by GetAuthenticatedUser; defaults to "Test User"
+	AuthenticatedEmail  string // returned by GetAuthenticatedUser; defaults to "<EMAIL_ADDRESS>"
 }
 
 // GetFileCallCount returns the total number of GetFile calls made so far.
@@ -66,6 +67,13 @@ func (fc *FakeClient) SetGetFileError(err error) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	fc.nextGetFileErr = err
+}
+
+// SetBranchExistsError makes the next BranchExists call return err.
+func (fc *FakeClient) SetBranchExistsError(err error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.nextBranchExistsErr = err
 }
 
 // SetPutFileError makes the next PutFile call return err before writing a file.
@@ -117,6 +125,11 @@ func (fc *FakeClient) BranchExists(_ context.Context, name string) (bool, error)
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	fc.ensureMaps()
+	if fc.nextBranchExistsErr != nil {
+		err := fc.nextBranchExistsErr
+		fc.nextBranchExistsErr = nil
+		return false, err
+	}
 	_, ok := fc.branches[name]
 	return ok, nil
 }

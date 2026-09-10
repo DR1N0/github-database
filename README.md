@@ -54,9 +54,12 @@ mydb/
 
 ```go
 import (
+    "context"
     "embed"
     "io/fs"
+    "log"
     "os"
+    "time"
 
     "github.com/DR1N0/github-database/ghdb"
 )
@@ -65,15 +68,30 @@ import (
 var baseline embed.FS
 
 func openDB() (ghdb.TableDB, error) {
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+    defer cancel()
+
     sub, _ := fs.Sub(baseline, "mydb")
     return ghdb.NewOption(sub).
         Token(func() string { return os.Getenv("GITHUB_TOKEN") }).
+        GitHubRequestTimeout(90 * time.Second).
+        StartupProgress(func(event ghdb.StartupProgress) {
+            log.Printf("database startup: %s", event.Kind)
+        }).
         AllowOfflineFallback().
-        OpenTable()
+        OpenTable(ctx)
 }
 ```
 
 Omit `.Token(...)` (or return an empty string) to open in offline mode.
+
+### Startup controls
+
+`Open`, `OpenTable`, and `OpenGraph` require a `context.Context`. Use the application or request context so startup stops when its caller is cancelled or its deadline expires. A cancelled or expired context returns `context.Canceled` or `context.DeadlineExceeded` and never activates online workers.
+
+Each GitHub HTTP request uses a 30-second timeout by default. Set `GitHubRequestTimeout` to a positive duration to override it; zero and negative values retain the default. The caller context and the per-request timeout both apply, so the first deadline to expire ends the request. `AllowOfflineFallback` handles ordinary online-startup failures only: it never converts cancellation or deadline errors into an offline database.
+
+`StartupProgress` receives synchronous online-startup notifications for the branch lookup, each replay-directory listing, and replay segments 1, every tenth segment, and the final segment. No events are emitted for token-less offline opens. Callbacks are never invoked concurrently or while database data locks are held, but run inline with startup; keep them short and non-blocking, and do not call back into startup from them.
 
 For GitHub Enterprise, add `.Host("your.ghe.host")`. For signed checkpoints (so CI "require signed commits" rules pass), add `.CommitSigner(fn)`:
 
@@ -88,12 +106,12 @@ ghdb.NewOption(sub).
         return signWithGPG(payload)
     }).
     AllowOfflineFallback().
-    OpenTable()
+    OpenTable(ctx)
 ```
 
 When `CommitSigner` is set, each checkpoint commit is signed and GitHub shows a "Verified" badge (assuming your GPG key is registered on the account).
 
-> **Important:** `CommitSigner` requires `Committer(name, email)` to be set explicitly. The email must match the one associated with your GPG key on GitHub. If `Committer` is omitted, `Open()` returns an error.
+> **Important:** `CommitSigner` requires `Committer(name, email)` to be set explicitly. The email must match the one associated with your GPG key on GitHub. If `Committer` is omitted, `Open(ctx)` returns an error.
 >
 > GitHub retrieves a no-reply address (e.g. `12345+user@users.noreply.github.com`) for many accounts, which will not match a GPG key — commits would be "Unverified". Setting `Committer` explicitly ensures the email in the commit matches the key.
 

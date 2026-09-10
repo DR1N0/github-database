@@ -23,7 +23,7 @@ func testBaseline(t *testing.T) fstest.MapFS {
 }
 
 func TestOpenOfflineTable(t *testing.T) {
-	db, err := NewOption(testBaseline(t)).Open()
+	db, err := NewOption(testBaseline(t)).Open(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,21 +44,21 @@ func TestOpenOfflineTable(t *testing.T) {
 
 func TestOpenBadMeta(t *testing.T) {
 	fsys := fstest.MapFS{"db_meta.json": {Data: []byte(`not json`)}}
-	_, err := NewOption(fsys).Open()
+	_, err := NewOption(fsys).Open(context.Background())
 	if err == nil {
 		t.Fatal("expected error for bad db_meta.json")
 	}
 }
 
 func TestOpenMissingMeta(t *testing.T) {
-	_, err := NewOption(fstest.MapFS{}).Open()
+	_, err := NewOption(fstest.MapFS{}).Open(context.Background())
 	if err == nil {
 		t.Fatal("expected error for missing db_meta.json")
 	}
 }
 
 func TestOpenOfflineCheckpointReturnsError(t *testing.T) {
-	db, err := NewOption(testBaseline(t)).Open()
+	db, err := NewOption(testBaseline(t)).Open(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestOpenValidDeltaSegmentConfig(t *testing.T) {
 	}
 	baseline["db_meta.json"] = &fstest.MapFile{Data: meta}
 
-	if _, err := NewOption(baseline).Open(); err != nil {
+	if _, err := NewOption(baseline).Open(context.Background()); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 }
@@ -130,7 +130,7 @@ func TestOpenRejectsOversizedDeltaSegmentBytes(t *testing.T) {
 	}
 	baseline["db_meta.json"] = &fstest.MapFile{Data: meta}
 
-	_, err = NewOption(baseline).Open()
+	_, err = NewOption(baseline).Open(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "max_delta_segment_bytes") {
 		t.Fatalf("Open error = %v, want max_delta_segment_bytes validation error", err)
 	}

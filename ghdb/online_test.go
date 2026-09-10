@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -40,6 +43,522 @@ func newOnlineFake(t *testing.T) (*github.FakeClient, fstest.MapFS) {
 		t.Fatal(err)
 	}
 	return fc, onlineBaseline(t)
+}
+
+// blockingClient records GitHub calls and waits for cancellation at one selected method.
+type blockingClient struct {
+	github.Interface
+	block string
+	calls []string
+
+	mu sync.Mutex
+}
+
+func (c *blockingClient) record(ctx context.Context, method string) error {
+	c.mu.Lock()
+	c.calls = append(c.calls, method)
+	c.mu.Unlock()
+	if c.block != method {
+		return nil
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (c *blockingClient) Calls() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.calls...)
+}
+
+func (c *blockingClient) GetFile(ctx context.Context, branch, path string) ([]byte, string, error) {
+	if err := c.record(ctx, "GetFile"); err != nil {
+		return nil, "", err
+	}
+	return c.Interface.GetFile(ctx, branch, path)
+}
+
+func (c *blockingClient) PutFile(ctx context.Context, branch, path, message string, content []byte, currentSHA string) error {
+	if err := c.record(ctx, "PutFile"); err != nil {
+		return err
+	}
+	return c.Interface.PutFile(ctx, branch, path, message, content, currentSHA)
+}
+
+func (c *blockingClient) ListDir(ctx context.Context, branch, path string) ([]github.DirEntry, error) {
+	if err := c.record(ctx, "ListDir"); err != nil {
+		return nil, err
+	}
+	return c.Interface.ListDir(ctx, branch, path)
+}
+
+func (c *blockingClient) BranchExists(ctx context.Context, name string) (bool, error) {
+	if err := c.record(ctx, "BranchExists"); err != nil {
+		return false, err
+	}
+	return c.Interface.BranchExists(ctx, name)
+}
+
+func (c *blockingClient) CreateBranch(ctx context.Context, name, fromSHA string) error {
+	if err := c.record(ctx, "CreateBranch"); err != nil {
+		return err
+	}
+	return c.Interface.CreateBranch(ctx, name, fromSHA)
+}
+
+func (c *blockingClient) DefaultBranch(ctx context.Context) (string, string, error) {
+	if err := c.record(ctx, "DefaultBranch"); err != nil {
+		return "", "", err
+	}
+	return c.Interface.DefaultBranch(ctx)
+}
+
+func (c *blockingClient) CreatePR(ctx context.Context, title, head, base string) (string, error) {
+	if err := c.record(ctx, "CreatePR"); err != nil {
+		return "", err
+	}
+	return c.Interface.CreatePR(ctx, title, head, base)
+}
+
+func (c *blockingClient) GetAuthenticatedUser(ctx context.Context) (string, string, error) {
+	if err := c.record(ctx, "GetAuthenticatedUser"); err != nil {
+		return "", "", err
+	}
+	return c.Interface.GetAuthenticatedUser(ctx)
+}
+
+func (c *blockingClient) GetCommitTree(ctx context.Context, commitSHA string) (string, error) {
+	if err := c.record(ctx, "GetCommitTree"); err != nil {
+		return "", err
+	}
+	return c.Interface.GetCommitTree(ctx, commitSHA)
+}
+
+func (c *blockingClient) CreateTree(ctx context.Context, baseTreeSHA string, files map[string][]byte) (string, error) {
+	if err := c.record(ctx, "CreateTree"); err != nil {
+		return "", err
+	}
+	return c.Interface.CreateTree(ctx, baseTreeSHA, files)
+}
+
+func (c *blockingClient) CreateCommit(ctx context.Context, treeSHA, parentSHA, message, name, email string, ts time.Time, signature string) (string, error) {
+	if err := c.record(ctx, "CreateCommit"); err != nil {
+		return "", err
+	}
+	return c.Interface.CreateCommit(ctx, treeSHA, parentSHA, message, name, email, ts, signature)
+}
+
+func (c *blockingClient) UpdateRef(ctx context.Context, branch, commitSHA string) error {
+	if err := c.record(ctx, "UpdateRef"); err != nil {
+		return err
+	}
+	return c.Interface.UpdateRef(ctx, branch, commitSHA)
+}
+
+// cancelAfterListDirClient cancels its context after a successful directory listing.
+type cancelAfterListDirClient struct {
+	*blockingClient
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterListDirClient) ListDir(ctx context.Context, branch, path string) ([]github.DirEntry, error) {
+	if err := c.record(ctx, "ListDir"); err != nil {
+		return nil, err
+	}
+	entries, err := c.Interface.ListDir(ctx, branch, path)
+	if err == nil {
+		c.cancel()
+	}
+	return entries, err
+}
+
+func waitForGitHubCall(t *testing.T, client *blockingClient, method string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, call := range client.Calls() {
+			if call == method {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("startup did not call %s; calls: %v", method, client.Calls())
+}
+
+func graphBaseline(t *testing.T) fstest.MapFS {
+	t.Helper()
+	meta, err := json.Marshal(ghdb.Config{
+		Name: "testgraph", Version: 1, Mode: "graph",
+		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		Vertices: []ghdb.VertexSpec{{Label: "component"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fstest.MapFS{"db_meta.json": {Data: meta}}
+}
+
+func TestOpenTableContext(t *testing.T) {
+	ctx := context.Background()
+	var events []ghdb.StartupProgress
+	db, err := ghdb.NewOption(onlineBaseline(t)).
+		StartupProgress(func(event ghdb.StartupProgress) { events = append(events, event) }).
+		GitHubRequestTimeout(90 * time.Second).
+		OpenTable(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.IsOnline() {
+		t.Fatal("token-less open must remain offline")
+	}
+	if events != nil {
+		t.Fatalf("token-less open emitted startup events: %#v", events)
+	}
+}
+
+func TestOpenGraphContext(t *testing.T) {
+	ctx := context.Background()
+	var events []ghdb.StartupProgress
+	db, err := ghdb.NewOption(graphBaseline(t)).
+		StartupProgress(func(event ghdb.StartupProgress) { events = append(events, event) }).
+		OpenGraph(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.IsOnline() {
+		t.Fatal("token-less open must remain offline")
+	}
+	if events != nil {
+		t.Fatalf("token-less open emitted startup events: %#v", events)
+	}
+}
+
+func onlineBaselineAtVersion(t *testing.T, version int) fstest.MapFS {
+	t.Helper()
+	meta, err := json.Marshal(ghdb.Config{
+		Name: "testdb", Version: version, Mode: "table",
+		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		Tables: []ghdb.TableSpec{{Name: "things", Key: "id"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fstest.MapFS{
+		"db_meta.json":       {Data: meta},
+		"tables/things.json": {Data: []byte(`{"a":{"id":"a"}}`)},
+	}
+}
+
+func seedStartupSegments(t *testing.T, fc *github.FakeClient, version, count int, includeMalformed bool) {
+	t.Helper()
+	for segment := 1; segment <= count; segment++ {
+		record := ghdb.MutationRecord{
+			TS: time.Date(2026, 9, 10, 0, 0, segment, 0, time.UTC), Op: "set", Table: "things",
+			Key: fmt.Sprintf("startup-%d", segment), Value: json.RawMessage(fmt.Sprintf(`{"id":"startup-%d"}`, segment)),
+		}
+		data, err := ghdb.MarshalJSONL([]ghdb.MutationRecord{record})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if includeMalformed && segment == 1 {
+			data = append(data, []byte("malformed-startup-payload-marker\n")...)
+		}
+		path := fmt.Sprintf("testdb/v%d/segment-%02d.jsonl", version, segment)
+		if err := fc.PutFile(context.Background(), "ghdb-data", path, "seed", data, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestOpenOnlineStartupProgress(t *testing.T) {
+	const version = 13
+	fc, _ := newOnlineFake(t)
+	seedStartupSegments(t, fc, version, 21, false)
+
+	var events []ghdb.StartupProgress
+	db, err := ghdb.OpenWithClientAndStartupProgress(onlineBaselineAtVersion(t, version), fc, func(event ghdb.StartupProgress) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+
+	want := []ghdb.StartupProgress{
+		{Kind: ghdb.StartupBranchLookup},
+		{Kind: ghdb.StartupReplayListing, Version: version},
+		{Kind: ghdb.StartupReplaySegment, Version: version, Segment: 1, TotalSegments: 21},
+		{Kind: ghdb.StartupReplaySegment, Version: version, Segment: 10, TotalSegments: 21},
+		{Kind: ghdb.StartupReplaySegment, Version: version, Segment: 20, TotalSegments: 21},
+		{Kind: ghdb.StartupReplaySegment, Version: version, Segment: 21, TotalSegments: 21},
+		{Kind: ghdb.StartupReplayListing, Version: version + 1},
+	}
+	if !startupProgressEqual(events, want) {
+		t.Fatalf("startup events = %#v, want %#v", events, want)
+	}
+
+	fc, _ = newOnlineFake(t)
+	seedStartupSegments(t, fc, version, 20, false)
+	events = nil
+	db, err = ghdb.OpenWithClientAndStartupProgress(onlineBaselineAtVersion(t, version), fc, func(event ghdb.StartupProgress) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	want = []ghdb.StartupProgress{
+		{Kind: ghdb.StartupBranchLookup},
+		{Kind: ghdb.StartupReplayListing, Version: version},
+		{Kind: ghdb.StartupReplaySegment, Version: version, Segment: 1, TotalSegments: 20},
+		{Kind: ghdb.StartupReplaySegment, Version: version, Segment: 10, TotalSegments: 20},
+		{Kind: ghdb.StartupReplaySegment, Version: version, Segment: 20, TotalSegments: 20},
+		{Kind: ghdb.StartupReplayListing, Version: version + 1},
+	}
+	if !startupProgressEqual(events, want) {
+		t.Fatalf("startup events with final tenth segment = %#v, want %#v", events, want)
+	}
+
+	fc, _ = newOnlineFake(t)
+	seedStartupSegments(t, fc, version, 1, false)
+	seedStartupSegments(t, fc, version+1, 1, false)
+	events = nil
+	db, err = ghdb.OpenWithClientAndStartupProgress(onlineBaselineAtVersion(t, version), fc, func(event ghdb.StartupProgress) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	want = []ghdb.StartupProgress{
+		{Kind: ghdb.StartupBranchLookup},
+		{Kind: ghdb.StartupReplayListing, Version: version},
+		{Kind: ghdb.StartupReplaySegment, Version: version, Segment: 1, TotalSegments: 1},
+		{Kind: ghdb.StartupReplayListing, Version: version + 1},
+		{Kind: ghdb.StartupReplayListing, Version: version + 1},
+		{Kind: ghdb.StartupReplaySegment, Version: version + 1, Segment: 1, TotalSegments: 1},
+	}
+	if !startupProgressEqual(events, want) {
+		t.Fatalf("startup events with optional next version = %#v, want %#v", events, want)
+	}
+}
+
+func TestStartupLogs(t *testing.T) {
+	const version = 13
+	fc, _ := newOnlineFake(t)
+	seedStartupSegments(t, fc, version, 21, true)
+	var output bytes.Buffer
+
+	db, err := ghdb.OpenWithClientAndLogger(onlineBaselineAtVersion(t, version), fc, log.New(&output, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(context.Background())
+	logs := output.String()
+	for _, want := range []string{
+		`ghdb: startup: checking delta branch "ghdb-data"`,
+		`ghdb: startup: delta branch "ghdb-data" exists=true completed in `,
+		`ghdb: replay: listing segments path=testdb/v13`,
+		`ghdb: replay: listed path=testdb/v13 segments=21 elapsed=`,
+		`ghdb: replay: completed path=testdb/v13 segments=21 `,
+		"records=21 elapsed=",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("logs do not contain %q:\n%s", want, logs)
+		}
+	}
+	for _, segment := range []int{1, 10, 20, 21} {
+		want := fmt.Sprintf("ghdb: replay: segment=%d/21 file=", segment)
+		if !strings.Contains(logs, want) {
+			t.Errorf("logs do not contain bounded segment line %q:\n%s", want, logs)
+		}
+	}
+	if got := strings.Count(logs, "ghdb: replay: segment="); got != 4 {
+		t.Errorf("bounded segment log count = %d, want 4; logs:\n%s", got, logs)
+	}
+	if strings.Contains(logs, "malformed-startup-payload-marker") {
+		t.Errorf("logs expose malformed record data:\n%s", logs)
+	}
+}
+
+func startupProgressEqual(got, want []ghdb.StartupProgress) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestOpenAlreadyCanceledReturnsNoDB(t *testing.T) {
+	fc, baseline := newOnlineFake(t)
+	client := &blockingClient{Interface: fc}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	db, err := ghdb.OpenWithClientContext(baseline, ctx, client, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open error = %v, want context.Canceled", err)
+	}
+	if db != nil {
+		t.Fatalf("Open returned DB %#v for canceled context", db)
+	}
+	if calls := client.Calls(); len(calls) != 0 {
+		t.Fatalf("GitHub calls = %v, want none", calls)
+	}
+}
+
+func TestOpenCancellationStopsStartup(t *testing.T) {
+	for _, tc := range []struct {
+		block string
+		seed  bool
+		want  []string
+	}{
+		{block: "BranchExists", want: []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists"}},
+		{block: "ListDir", want: []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists", "ListDir"}},
+		{block: "GetFile", seed: true, want: []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists", "ListDir", "GetFile"}},
+	} {
+		t.Run(tc.block, func(t *testing.T) {
+			fc, baseline := newOnlineFake(t)
+			if tc.seed {
+				if err := fc.PutFile(context.Background(), "ghdb-data", "testdb/v1/blocked.jsonl", "seed", []byte("\n"), ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := &blockingClient{Interface: fc, block: tc.block}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			type openResult struct {
+				db  ghdb.DB
+				err error
+			}
+			result := make(chan openResult, 1)
+			go func() {
+				db, err := ghdb.OpenWithClientContext(baseline, ctx, client, true)
+				result <- openResult{db: db, err: err}
+			}()
+
+			waitForGitHubCall(t, client, tc.block)
+			cancel()
+			got := <-result
+			if !errors.Is(got.err, context.Canceled) {
+				t.Fatalf("Open error = %v, want context.Canceled", got.err)
+			}
+			if got.db != nil {
+				t.Fatalf("Open returned DB %#v for canceled context", got.db)
+			}
+			if calls := client.Calls(); !slicesEqual(calls, tc.want) {
+				t.Fatalf("GitHub calls = %v, want %v", calls, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenCancellationAfterReplayListingStopsBeforeGetFile(t *testing.T) {
+	fc, baseline := newOnlineFake(t)
+	if err := fc.PutFile(context.Background(), "ghdb-data", "testdb/v1/listed.jsonl", "seed", []byte("\n"), ""); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &cancelAfterListDirClient{
+		blockingClient: &blockingClient{Interface: fc},
+		cancel:         cancel,
+	}
+
+	db, err := ghdb.OpenWithClientContext(baseline, ctx, client, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open error = %v, want context.Canceled", err)
+	}
+	if db != nil {
+		t.Fatalf("Open returned DB %#v for canceled context", db)
+	}
+	want := []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists", "ListDir"}
+	if calls := client.Calls(); !slicesEqual(calls, want) {
+		t.Fatalf("GitHub calls = %v, want %v; GetFile must not follow cancellation after ListDir", calls, want)
+	}
+}
+
+func TestOpenOfflineFallbackOnBranchExistsError(t *testing.T) {
+	fc, baseline := newOnlineFake(t)
+	fc.SetBranchExistsError(errors.New("injected BranchExists failure"))
+	client := &blockingClient{Interface: fc}
+
+	db, err := ghdb.OpenWithClientContext(baseline, context.Background(), client, true)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if db == nil || db.IsOnline() {
+		t.Fatalf("fallback DB = %#v, online = %v; want offline DB", db, db != nil && db.IsOnline())
+	}
+	if err := db.Checkpoint(context.Background()); !errors.Is(err, ghdb.ErrOffline) {
+		t.Fatalf("offline Checkpoint error = %v, want ErrOffline", err)
+	}
+	want := []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists"}
+	if calls := client.Calls(); !slicesEqual(calls, want) {
+		t.Fatalf("GitHub calls = %v, want %v", calls, want)
+	}
+}
+
+func slicesEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestOpenCallerDeadlineStopsStartupAndProgress(t *testing.T) {
+	fc, baseline := newOnlineFake(t)
+	client := &blockingClient{Interface: fc, block: "BranchExists"}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	var events []ghdb.StartupProgress
+
+	db, err := ghdb.OpenWithClientContextAndStartupProgress(baseline, ctx, client, true, func(event ghdb.StartupProgress) {
+		events = append(events, event)
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Open error = %v, want context.DeadlineExceeded", err)
+	}
+	if db != nil {
+		t.Fatalf("Open returned DB %#v for expired deadline", db)
+	}
+	if calls := client.Calls(); !slicesEqual(calls, []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists"}) {
+		t.Fatalf("GitHub calls = %v, want startup to stop at BranchExists", calls)
+	}
+	wantEvents := []ghdb.StartupProgress{{Kind: ghdb.StartupBranchLookup}}
+	if !startupProgressEqual(events, wantEvents) {
+		t.Fatalf("startup events = %#v, want %#v; no event may follow cancellation", events, wantEvents)
+	}
+}
+
+func TestStartupFailureStopsProgress(t *testing.T) {
+	fc, baseline := newOnlineFake(t)
+	fc.SetBranchExistsError(errors.New("injected BranchExists failure"))
+	var events []ghdb.StartupProgress
+
+	db, err := ghdb.OpenWithClientContextAndStartupProgress(baseline, context.Background(), fc, false, func(event ghdb.StartupProgress) {
+		events = append(events, event)
+	})
+	if err == nil {
+		t.Fatal("Open error = nil, want startup failure")
+	}
+	if db != nil {
+		t.Fatalf("Open returned DB %#v after startup failure", db)
+	}
+	wantEvents := []ghdb.StartupProgress{{Kind: ghdb.StartupBranchLookup}}
+	if !startupProgressEqual(events, wantEvents) {
+		t.Fatalf("startup events = %#v, want %#v; no event may follow startup failure", events, wantEvents)
+	}
 }
 
 func TestOpenOnlineCreatesBranch(t *testing.T) {
@@ -82,6 +601,85 @@ func TestOpenOnlineReplay(t *testing.T) {
 		t.Errorf("replay: got %q ok=%v", v, ok)
 	}
 	db.Close(context.Background())
+}
+
+func TestOpenReplaysCurrentAndNextVersionsWithFilteringOrderingAndCorruption(t *testing.T) {
+	cutoff := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	fc, baseline := newOnlineFake(t)
+	meta, err := json.Marshal(ghdb.Config{
+		Name: "testdb", Version: 1, Mode: "table",
+		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data", BaselineTime: cutoff,
+		Tables: []ghdb.TableSpec{{Name: "things", Key: "id"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline["db_meta.json"] = &fstest.MapFile{Data: meta}
+
+	record := func(second int, key, state string) ghdb.MutationRecord {
+		return ghdb.MutationRecord{
+			TS: cutoff.Add(time.Duration(second) * time.Second), Op: "set", Table: "things", Key: key,
+			Value: json.RawMessage(fmt.Sprintf(`{"id":%q,"state":%q}`, key, state)),
+		}
+	}
+	line := func(r ghdb.MutationRecord) []byte {
+		data, err := ghdb.MarshalJSONL([]ghdb.MutationRecord{r})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	seed := func(path string, records ...[]byte) {
+		if err := fc.PutFile(context.Background(), "ghdb-data", path, "seed", bytes.Join(records, nil), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Each version has valid mutations on both sides of a malformed line. The
+	// later mutation is intentionally listed first to assert timestamp ordering.
+	seed("testdb/v1/current.jsonl",
+		line(record(-1, "filtered-current", "filtered-current")),
+		line(record(2, "current-order", "current-later")),
+		[]byte("malformed-current-record\n"),
+		line(record(1, "current-order", "current-earlier")),
+		line(record(3, "current-after-corruption", "current-after-corruption")),
+	)
+	seed("testdb/v2/next.jsonl",
+		line(record(-1, "filtered-next", "filtered-next")),
+		line(record(5, "next-order", "next-later")),
+		[]byte("malformed-next-record\n"),
+		line(record(4, "next-order", "next-earlier")),
+		line(record(6, "next-after-corruption", "next-after-corruption")),
+	)
+
+	db, err := ghdb.OpenWithClient(baseline, fc)
+	if err != nil {
+		t.Fatalf("OpenWithClient: %v", err)
+	}
+	defer db.Close(context.Background())
+	table := db.(ghdb.TableDB).Table("things")
+	for _, tc := range []struct {
+		key  string
+		want string
+	}{
+		{"current-order", `{"id":"current-order","state":"current-later"}`},
+		{"current-after-corruption", `{"id":"current-after-corruption","state":"current-after-corruption"}`},
+		{"next-order", `{"id":"next-order","state":"next-later"}`},
+		{"next-after-corruption", `{"id":"next-after-corruption","state":"next-after-corruption"}`},
+	} {
+		got, ok := table.Get(tc.key)
+		if !ok || string(got) != tc.want {
+			t.Errorf("replayed %q = %q, %v; want %q", tc.key, got, ok, tc.want)
+		}
+	}
+	for _, key := range []string{"filtered-current", "filtered-next"} {
+		if _, ok := table.Get(key); ok {
+			t.Errorf("baseline-filtered mutation %q was replayed", key)
+		}
+	}
+	if got := ghdb.WriteVer(db); got != 2 {
+		t.Fatalf("write version = %d, want next version 2", got)
+	}
 }
 
 func TestOnlineReplayAndPollSkipCorruptSegments(t *testing.T) {
@@ -978,5 +1576,215 @@ func TestFlushPartialWriteFailureRestoresOnlyUnpersisted(t *testing.T) {
 	records = orderedSegmentRecords(t, contents, "pod-partial")
 	if len(records) != 2 || records[0].Key != "one" || records[1].Key != "two" {
 		t.Fatalf("records after retry = %#v, want one, two exactly once", records)
+	}
+}
+
+// requestTimeoutDefaultBranchClient makes the first startup call use a concrete
+// HTTP client whose timeout is shorter than the caller's context deadline.
+type requestTimeoutDefaultBranchClient struct {
+	github.Interface
+	client *http.Client
+	url    string
+}
+
+func (c *requestTimeoutDefaultBranchClient) DefaultBranch(ctx context.Context) (string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	return "main", "sha0", nil
+}
+
+// startupListDirErrorClient makes one replay-directory request fail while
+// retaining call recording for assertions about the startup boundary.
+type startupListDirErrorClient struct {
+	*blockingClient
+	failPath string
+	err      error
+}
+
+func (c *startupListDirErrorClient) ListDir(ctx context.Context, branch, path string) ([]github.DirEntry, error) {
+	if err := c.record(ctx, "ListDir"); err != nil {
+		return nil, err
+	}
+	if path == c.failPath {
+		return nil, c.err
+	}
+	return c.Interface.ListDir(ctx, branch, path)
+}
+
+func TestOpenFallsBackAfterRequestTimeoutWithActiveCallerContext(t *testing.T) {
+	const requestTimeout = 20 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	fc, baseline := newOnlineFake(t)
+	client := &requestTimeoutDefaultBranchClient{
+		Interface: fc,
+		client:    &http.Client{Timeout: requestTimeout},
+		url:       server.URL,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	db, err := ghdb.OpenWithClientContext(baseline, ctx, client, true)
+	if err != nil {
+		t.Fatalf("Open with request timeout and offline fallback: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("caller context unexpectedly expired: %v", ctx.Err())
+	}
+	if db == nil || db.IsOnline() {
+		t.Fatalf("fallback DB = %#v, online = %v; want offline DB", db, db != nil && db.IsOnline())
+	}
+	if err := db.Checkpoint(context.Background()); !errors.Is(err, ghdb.ErrOffline) {
+		t.Fatalf("offline Checkpoint error = %v, want ErrOffline", err)
+	}
+}
+
+func TestOpenNextVersionListDirFailureDoesNotActivateOnline(t *testing.T) {
+	const nextPath = "testdb/v2"
+	for _, tc := range []struct {
+		name     string
+		fallback bool
+	}{
+		{name: "startup error"},
+		{name: "offline fallback", fallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc, baseline := newOnlineFake(t)
+			client := &startupListDirErrorClient{
+				blockingClient: &blockingClient{Interface: fc},
+				failPath:       nextPath,
+				err:            errors.New("ghdb: ListDir testdb/v2: HTTP 500"),
+			}
+
+			db, err := ghdb.OpenWithClientContext(baseline, context.Background(), client, tc.fallback)
+			if tc.fallback {
+				if err != nil {
+					t.Fatalf("Open with fallback: %v", err)
+				}
+				if db == nil || db.IsOnline() {
+					t.Fatalf("fallback DB = %#v, online = %v; want offline DB", db, db != nil && db.IsOnline())
+				}
+				if err := db.Checkpoint(context.Background()); !errors.Is(err, ghdb.ErrOffline) {
+					t.Fatalf("offline Checkpoint error = %v, want ErrOffline", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+					t.Fatalf("Open error = %v, want next-version ListDir HTTP 500 failure", err)
+				}
+				if db != nil {
+					t.Fatalf("Open returned DB %#v after next-version ListDir failure", db)
+				}
+			}
+			if calls := client.Calls(); !slicesEqual(calls, []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists", "ListDir", "ListDir"}) {
+				t.Fatalf("GitHub calls = %v, want no calls after next-version ListDir failure", calls)
+			}
+		})
+	}
+}
+
+func TestOpenCancellationFromStartupProgressStopsLaterGitHubCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		seed     func(t *testing.T, fc *github.FakeClient)
+		cancelOn func(event ghdb.StartupProgress, seen map[ghdb.StartupProgress]int) bool
+		assert   func(t *testing.T, calls []string)
+	}{
+		{
+			name: "branch lookup",
+			cancelOn: func(event ghdb.StartupProgress, _ map[ghdb.StartupProgress]int) bool {
+				return event.Kind == ghdb.StartupBranchLookup
+			},
+			assert: func(t *testing.T, calls []string) {
+				if !slicesEqual(calls, []string{"DefaultBranch", "GetAuthenticatedUser"}) {
+					t.Fatalf("GitHub calls = %v, want no BranchExists after canceled branch progress", calls)
+				}
+			},
+		},
+		{
+			name: "current version replay listing",
+			cancelOn: func(event ghdb.StartupProgress, _ map[ghdb.StartupProgress]int) bool {
+				return event.Kind == ghdb.StartupReplayListing && event.Version == 1
+			},
+			assert: func(t *testing.T, calls []string) {
+				if !slicesEqual(calls, []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists"}) {
+					t.Fatalf("GitHub calls = %v, want no ListDir after canceled replay-listing progress", calls)
+				}
+			},
+		},
+		{
+			name: "bounded replay segment",
+			seed: func(t *testing.T, fc *github.FakeClient) {
+				seedStartupSegments(t, fc, 1, 11, false)
+			},
+			cancelOn: func(event ghdb.StartupProgress, _ map[ghdb.StartupProgress]int) bool {
+				return event.Kind == ghdb.StartupReplaySegment && event.Version == 1 && event.Segment == 10
+			},
+			assert: func(t *testing.T, calls []string) {
+				if len(calls) != 13 || calls[len(calls)-1] != "GetFile" {
+					t.Fatalf("GitHub calls = %v, want only nine GetFile calls before canceled segment-10 progress", calls)
+				}
+			},
+		},
+		{
+			name: "next version probe replay listing",
+			cancelOn: func(event ghdb.StartupProgress, _ map[ghdb.StartupProgress]int) bool {
+				return event.Kind == ghdb.StartupReplayListing && event.Version == 2
+			},
+			assert: func(t *testing.T, calls []string) {
+				if !slicesEqual(calls, []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists", "ListDir"}) {
+					t.Fatalf("GitHub calls = %v, want no next-version probe after canceled progress", calls)
+				}
+			},
+		},
+		{
+			name: "next version replay listing",
+			seed: func(t *testing.T, fc *github.FakeClient) {
+				seedStartupSegments(t, fc, 2, 1, false)
+			},
+			cancelOn: func(event ghdb.StartupProgress, seen map[ghdb.StartupProgress]int) bool {
+				return event.Kind == ghdb.StartupReplayListing && event.Version == 2 && seen[event] == 2
+			},
+			assert: func(t *testing.T, calls []string) {
+				if !slicesEqual(calls, []string{"DefaultBranch", "GetAuthenticatedUser", "BranchExists", "ListDir", "ListDir"}) {
+					t.Fatalf("GitHub calls = %v, want no replay ListDir after canceled next-version listing progress", calls)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc, baseline := newOnlineFake(t)
+			if tc.seed != nil {
+				tc.seed(t, fc)
+			}
+			client := &blockingClient{Interface: fc}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			seen := make(map[ghdb.StartupProgress]int)
+
+			db, err := ghdb.OpenWithClientContextAndStartupProgress(baseline, ctx, client, true, func(event ghdb.StartupProgress) {
+				seen[event]++
+				if tc.cancelOn(event, seen) {
+					cancel()
+				}
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Open error = %v, want context.Canceled", err)
+			}
+			if db != nil {
+				t.Fatalf("Open returned DB %#v after cancellation from progress callback", db)
+			}
+			tc.assert(t, client.Calls())
+		})
 	}
 }

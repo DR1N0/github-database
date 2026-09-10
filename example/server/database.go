@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"log"
@@ -15,13 +16,13 @@ var (
 	logger   = log.New(os.Stderr, "[ghdb-demo] ", log.LstdFlags)
 )
 
-func openDB(offline bool, baseline fs.FS) error {
+func openDB(ctx context.Context, offline bool, baseline fs.FS) error {
 	opt := ghdb.NewOption(baseline).Logger(logger)
 	if !offline {
 		opt = opt.Token(func() string { return os.Getenv("GITHUB_TOKEN") })
 	}
 	var err error
-	tableDB, err = opt.OpenTable()
+	tableDB, err = opt.OpenTable(ctx)
 	if err != nil {
 		return fmt.Errorf("open DB: %w", err)
 	}

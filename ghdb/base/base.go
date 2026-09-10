@@ -25,60 +25,128 @@ func NewBaseDB(cfg Config) Engine {
 	}
 }
 
-// StartOnline wires the engine into online mode: validates credentials, ensures the
-// delta branch exists, replays startup mutations, and starts flush/sync goroutines.
-// Call SetLogger before StartOnline so startup messages use the configured logger.
-func (b *baseDB) StartOnline(gh github.Interface) error {
+// StartOnline prepares the engine for online operation, then atomically publishes
+// that state and starts workers. Call SetLogger before StartOnline so startup
+// messages use the configured logger.
+func (b *baseDB) StartOnline(ctx context.Context, gh github.Interface, onProgress StartupProgressFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b.gh = gh
 	cfg := b.cfg
 
-	ctx := context.Background()
 	_, mainSHA, err := gh.DefaultBranch(ctx)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("ghdb: credential validation failed: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	b.Logger().Printf("ghdb: online mode (credential validated)")
 
 	if b.committerName == "" {
 		name, email, err := gh.GetAuthenticatedUser(ctx)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			return fmt.Errorf("ghdb: get authenticated user: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		b.committerName = name
 		b.committerEmail = email
 	}
 
-	b.instanceID = deriveInstanceID()
-	b.online = true
-
+	branchStarted := time.Now()
+	b.Logger().Printf("ghdb: startup: checking delta branch %q", cfg.DeltaBranch)
+	if onProgress != nil {
+		onProgress(StartupProgress{Kind: StartupBranchLookup})
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	exists, err := gh.BranchExists(ctx, cfg.DeltaBranch)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("ghdb: check delta_branch: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.Logger().Printf("ghdb: startup: delta branch %q exists=%t completed in %s", cfg.DeltaBranch, exists, time.Since(branchStarted))
 	if !exists {
 		if err := gh.CreateBranch(ctx, cfg.DeltaBranch, mainSHA); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			return fmt.Errorf("ghdb: create delta_branch: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 	}
 
 	tCut := cfg.BaselineTime
 	versionPath := fmt.Sprintf("%s/v%d", GetDataRepoPath(cfg), cfg.Version)
-	if err := b.replayVersion(ctx, cfg, versionPath, tCut); err != nil {
+	if err := b.replayVersion(ctx, cfg, versionPath, tCut, onProgress); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("ghdb: startup replay: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	nextPath := fmt.Sprintf("%s/v%d", GetDataRepoPath(cfg), cfg.Version+1)
-	nextEntries, _ := gh.ListDir(ctx, cfg.DeltaBranch, nextPath)
-	if len(nextEntries) > 0 {
-		b.nextVerExists = true
-		b.writeVer = cfg.Version + 1
-		if err := b.replayVersion(ctx, cfg, nextPath, tCut); err != nil {
-			b.Logger().Printf("ghdb: startup replay v%d: %v", cfg.Version+1, err)
+	if onProgress != nil {
+		onProgress(StartupProgress{Kind: StartupReplayListing, Version: cfg.Version + 1})
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-	} else {
-		b.writeVer = cfg.Version
+	}
+	nextEntries, err := gh.ListDir(ctx, cfg.DeltaBranch, nextPath)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("ghdb: list next replay version: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
+	writeVer := cfg.Version
+	nextVerExists := len(nextEntries) > 0
+	if nextVerExists {
+		nextCfg := cfg
+		nextCfg.Version++
+		if err := b.replayVersion(ctx, nextCfg, nextPath, tCut, onProgress); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return fmt.Errorf("ghdb: startup replay v%d: %w", cfg.Version+1, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		writeVer = cfg.Version + 1
+	}
+
+	instanceID := deriveInstanceID(b.Logger())
+	b.mu.Lock()
+	b.instanceID = instanceID
+	b.writeVer = writeVer
+	b.nextVerExists = nextVerExists
+	b.mu.Unlock()
+	b.online = true
 	b.startFlush()
 	b.startSync()
 	return nil
@@ -216,11 +284,28 @@ func (b *baseDB) Close(ctx context.Context) error {
 // sorts by timestamp, and applies them via applyFn. A fetched segment is acknowledged
 // even when individual records cannot be parsed or applied, so an unchanged bad SHA
 // does not produce the same warnings on every poll.
-func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath string, tCut time.Time) error {
+func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath string, tCut time.Time, onProgress ...StartupProgressFunc) error {
+	var progress StartupProgressFunc
+	if len(onProgress) > 0 {
+		progress = onProgress[0]
+	}
+	replayStarted := time.Now()
+	listingStarted := time.Now()
+	b.Logger().Printf("ghdb: replay: listing segments path=%s", versionPath)
+	if progress != nil {
+		progress(StartupProgress{Kind: StartupReplayListing, Version: cfg.Version})
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	entries, err := b.gh.ListDir(ctx, cfg.DeltaBranch, versionPath)
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.Logger().Printf("ghdb: replay: listed path=%s segments=%d elapsed=%s", versionPath, len(entries), time.Since(listingStarted))
 	type replayedSegment struct {
 		path string
 		sha  string
@@ -233,15 +318,32 @@ func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath stri
 	}
 	var allRecs []replayedRecord
 	var replayed []replayedSegment
-	for _, e := range entries {
+	var totalBytes, totalRecords int
+	for i, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		segment := i + 1
+		segmentStarted := time.Now()
+		if progress != nil && shouldReportStartupSegment(segment, len(entries)) {
+			progress(StartupProgress{Kind: StartupReplaySegment, Version: cfg.Version, Segment: segment, TotalSegments: len(entries)})
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
 		path := versionPath + "/" + e.Name
 		data, _, err := b.gh.GetFile(ctx, cfg.DeltaBranch, path)
 		if err != nil {
-			b.Logger().Printf("ghdb: replay: skip %s (sha %s): GetFile failed", path, e.SHA)
-			continue
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return fmt.Errorf("get replay segment %s: %w", path, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
-		segment := replayedSegment{path: path, sha: e.SHA}
+		replayedEntry := replayedSegment{path: path, sha: e.SHA}
 		recs, parseErrs := decodeJSONL(data)
 		for _, parseErr := range parseErrs {
 			b.Logger().Printf("ghdb: replay: skip %s (sha %s) line %d: %s", path, e.SHA, parseErr.Line, jsonlWarningCategory(parseErr))
@@ -251,7 +353,12 @@ func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath stri
 				allRecs = append(allRecs, replayedRecord{record: decoded.record, path: path, sha: e.SHA, line: decoded.line})
 			}
 		}
-		replayed = append(replayed, segment)
+		totalBytes += len(data)
+		totalRecords += len(recs)
+		if shouldReportStartupSegment(segment, len(entries)) {
+			b.Logger().Printf("ghdb: replay: segment=%d/%d file=%s bytes=%d records=%d elapsed=%s", segment, len(entries), e.Name, len(data), len(recs), time.Since(segmentStarted))
+		}
+		replayed = append(replayed, replayedEntry)
 	}
 	sort.Slice(allRecs, func(i, j int) bool {
 		return allRecs[i].record.TS.Before(allRecs[j].record.TS)
@@ -279,16 +386,17 @@ func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath stri
 		}
 	}
 	b.mu.Unlock()
+	b.Logger().Printf("ghdb: replay: completed path=%s segments=%d bytes=%d records=%d elapsed=%s", versionPath, len(entries), totalBytes, totalRecords, time.Since(replayStarted))
 	return nil
 }
 
-func deriveInstanceID() string {
+func deriveInstanceID(logger *log.Logger) string {
 	if v := os.Getenv("POD_NAME"); v != "" {
-		log.Printf("ghdb: instance ID from POD_NAME: %s", v)
+		logger.Printf("ghdb: instance ID from POD_NAME: %s", v)
 		return v
 	}
 	if h, err := os.Hostname(); err == nil {
-		log.Printf("ghdb: instance ID from hostname: %s", h)
+		logger.Printf("ghdb: instance ID from hostname: %s", h)
 		return h
 	}
 	var b [16]byte
@@ -298,6 +406,6 @@ func deriveInstanceID() string {
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	id := fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
-	log.Printf("ghdb: instance ID from random UUID: %s", id)
+	logger.Printf("ghdb: instance ID from random UUID: %s", id)
 	return id
 }

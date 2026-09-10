@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"example/server"
 	"flag"
 	"io/fs"
 	"log"
+	"time"
 )
 
 //go:embed demo-database
@@ -19,5 +21,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("embed sub: %v", err)
 	}
-	server.RunServer(*offline, sub)
+	startupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	server.RunServer(startupCtx, *offline, sub)
 }

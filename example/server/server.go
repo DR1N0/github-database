@@ -28,7 +28,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func RunServer(offline bool, baseline fs.FS) {
+func RunServer(startupCtx context.Context, offline bool, baseline fs.FS) {
 	loadDotenv("../.env")
 
 	mode := "online"
@@ -36,7 +36,7 @@ func RunServer(offline bool, baseline fs.FS) {
 		mode = "offline"
 	}
 
-	if err := openDB(offline, baseline); err != nil {
+	if err := openDB(startupCtx, offline, baseline); err != nil {
 		logger.Fatalf("openDB: %v", err)
 	}
 

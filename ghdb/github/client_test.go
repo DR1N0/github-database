@@ -4,13 +4,62 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestNewGitHubClientZeroTimeoutUsesDefault(t *testing.T) {
+	client := NewGitHubClient("owner/repo", "token", "github.com", 0)
+	hc := client.(*httpClient)
+	if hc.hc.Timeout != DefaultRequestTimeout {
+		t.Fatalf("timeout = %v, want %v", hc.hc.Timeout, DefaultRequestTimeout)
+	}
+}
+
+func TestNewGitHubClientNegativeTimeoutUsesDefault(t *testing.T) {
+	client := NewGitHubClient("owner/repo", "token", "github.com", -time.Second)
+	hc := client.(*httpClient)
+	if hc.hc.Timeout != DefaultRequestTimeout {
+		t.Fatalf("timeout = %v, want %v", hc.hc.Timeout, DefaultRequestTimeout)
+	}
+}
+
+func TestNewGitHubClientCustomTimeout(t *testing.T) {
+	client := NewGitHubClient("owner/repo", "token", "github.com", 90*time.Second)
+	hc := client.(*httpClient)
+	if hc.hc.Timeout != 90*time.Second {
+		t.Fatalf("timeout = %v, want %v", hc.hc.Timeout, 90*time.Second)
+	}
+}
+
+func TestConfiguredRequestTimeoutPrecedesCallerDeadline(t *testing.T) {
+	const requestTimeout = 50 * time.Millisecond
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(250 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"sha":"late","size":0,"content":"","encoding":"base64"}`))
+	}))
+	defer server.Close()
+
+	client := NewGitHubClient("owner/repo", "token", "github.com", requestTimeout).(*httpClient)
+	client.baseURL = server.URL
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	started := time.Now()
+	_, _, err := client.GetFile(ctx, "main", "late.jsonl")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetFile error = %v, want request deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+		t.Fatalf("GetFile returned after %v, want configured request timeout before caller deadline", elapsed)
+	}
+}
 
 func TestGetFileLargeContentFallsBackToBlob(t *testing.T) {
 	want := []byte(strings.Repeat("x", 1_048_577))

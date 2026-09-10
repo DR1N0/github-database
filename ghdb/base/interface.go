@@ -43,7 +43,7 @@ type Engine interface {
 	Logger() *log.Logger
 
 	// Lifecycle — StartOnline is called once by Option.Open when credentials are present.
-	StartOnline(gh github.Interface) error
+	StartOnline(ctx context.Context, gh github.Interface, onProgress StartupProgressFunc) error
 	Checkpoint(ctx context.Context) error
 	Close(ctx context.Context) error
 

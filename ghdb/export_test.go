@@ -5,6 +5,7 @@ import (
 	"context"
 	"io/fs"
 	"log"
+	"time"
 
 	"github.com/DR1N0/github-database/ghdb/base"
 	"github.com/DR1N0/github-database/ghdb/github"
@@ -26,10 +27,30 @@ func engineOf(db DB) base.Engine {
 var (
 	// OpenWithClient injects a pre-built GitHub client, bypassing token auth. For tests only.
 	OpenWithClient = func(baseline fs.FS, gh github.Interface) (DB, error) {
-		return NewOption(baseline).withClient(gh).Open()
+		return NewOption(baseline).withClient(gh).Open(context.Background())
 	}
 	OpenWithClientAndLogger = func(baseline fs.FS, gh github.Interface, logger *log.Logger) (DB, error) {
-		return NewOption(baseline).Logger(logger).withClient(gh).Open()
+		return NewOption(baseline).Logger(logger).withClient(gh).Open(context.Background())
+	}
+	OpenWithClientAndStartupProgress = func(baseline fs.FS, gh github.Interface, fn StartupProgressFunc) (DB, error) {
+		return NewOption(baseline).StartupProgress(fn).withClient(gh).Open(context.Background())
+	}
+	OpenWithClientAndGitHubRequestTimeout = func(baseline fs.FS, gh github.Interface, timeout time.Duration) (DB, error) {
+		return NewOption(baseline).GitHubRequestTimeout(timeout).withClient(gh).Open(context.Background())
+	}
+	OpenWithClientContext = func(baseline fs.FS, ctx context.Context, gh github.Interface, allowOfflineFallback bool) (DB, error) {
+		o := NewOption(baseline).withClient(gh)
+		if allowOfflineFallback {
+			o.AllowOfflineFallback()
+		}
+		return o.Open(ctx)
+	}
+	OpenWithClientContextAndStartupProgress = func(baseline fs.FS, ctx context.Context, gh github.Interface, allowOfflineFallback bool, fn StartupProgressFunc) (DB, error) {
+		o := NewOption(baseline).StartupProgress(fn).withClient(gh)
+		if allowOfflineFallback {
+			o.AllowOfflineFallback()
+		}
+		return o.Open(ctx)
 	}
 
 	MarshalJSONL   = base.MarshalJSONL
@@ -72,15 +93,15 @@ var (
 	OpenWithClientAndSigner = func(baseline fs.FS, gh github.Interface, signer func([]byte) (string, error)) (DB, error) {
 		return NewOption(baseline).withClient(gh).
 			Committer("Test Bot", "testbot@example.com").
-			CommitSigner(signer).Open()
+			CommitSigner(signer).Open(context.Background())
 	}
 
 	OpenWithClientAndCommitter = func(baseline fs.FS, gh github.Interface, name, email string) (DB, error) {
-		return NewOption(baseline).withClient(gh).Committer(name, email).Open()
+		return NewOption(baseline).withClient(gh).Committer(name, email).Open(context.Background())
 	}
 
 	// OpenSignerOnly sets CommitSigner without Committer — used to verify the validation error.
 	OpenSignerOnly = func(baseline fs.FS, signer func([]byte) (string, error)) (DB, error) {
-		return NewOption(baseline).CommitSigner(signer).Open()
+		return NewOption(baseline).CommitSigner(signer).Open(context.Background())
 	}
 )
