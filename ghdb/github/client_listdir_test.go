@@ -62,7 +62,7 @@ func TestListDirWalksGitTrees(t *testing.T) {
 // does not exist yet yields no entries and no error.
 func TestListDirMissingBranchOrPathIsEmpty(t *testing.T) {
 	client := treeServer(t, map[string]string{
-		"/repos/owner/repo/git/trees/main": `{"tree":[{"path":"db","type":"tree","sha":"tree-db"}]}`,
+		"/repos/owner/repo/git/trees/main":    `{"tree":[{"path":"db","type":"tree","sha":"tree-db"}]}`,
 		"/repos/owner/repo/git/trees/tree-db": `{"tree":[]}`,
 	}, nil)
 
