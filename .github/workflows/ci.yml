@@ -10,16 +10,23 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        go: ['1.21.x', 'stable']
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.21.x'
-          cache: true
+          go-version: ${{ matrix.go }}
+          # The module has no go.sum, so dependency caching has nothing to key on.
+          cache: false
 
       - name: Check formatting
+        shell: bash
         run: test -z "$(gofmt -l .)"
 
       - name: Vet
@@ -29,9 +36,16 @@ jobs:
         run: go build ./...
 
       - name: Test
-        run: go test -race -count=1 -coverpkg=./... -coverprofile=cover.out ./...
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            go test -race -count=1 -coverpkg=./... -coverprofile=cover.out ./...
+          else
+            go test -count=1 ./...
+          fi
 
       - name: Coverage summary
+        if: runner.os == 'Linux'
         run: go tool cover -func=cover.out | tail -1
 
       - name: Build example
