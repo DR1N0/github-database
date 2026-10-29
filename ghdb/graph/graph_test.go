@@ -35,7 +35,8 @@ func TestOversizedGraphOperationsLeaveStateAndBufferUnchanged(t *testing.T) {
 		}
 	}
 	db := makeGraphDB(t)
-	assertTooLarge(t, db.Vertex("component").Set(big, json.RawMessage(`{}`)))
+	// The id field must match so the oversized-value check is what rejects this.
+	assertTooLarge(t, db.Vertex("component").Set(big, json.RawMessage(`{"id":"`+big+`"}`)))
 	assertTooLarge(t, db.Vertex("component").Patch(big, map[string]json.RawMessage{}))
 	assertTooLarge(t, db.SetEdge("dep", big, "to", json.RawMessage(`{}`)))
 	assertTooLarge(t, db.PatchEdge("dep", big, "to", map[string]json.RawMessage{}))

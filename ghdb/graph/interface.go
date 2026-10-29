@@ -24,6 +24,9 @@ type EdgeResult struct {
 type GraphDB interface {
 	base.DB
 	Schema() GraphSchema
+	// Vertex returns the labelled vertex set, or nil when the label is not
+	// declared in the schema. Compare the result against nil before calling
+	// methods on it.
 	Vertex(label string) VertexSet
 	AddEdge(label, from, to string) error
 	RemoveEdge(label, from, to string) error

@@ -147,7 +147,7 @@ func (o *Option) Open(ctx context.Context) (DB, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cfg, db, eng, err := parseAndLoad(o.baseline)
+	cfg, db, eng, err := parseAndLoad(o.baseline, o.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +203,9 @@ func (o *Option) Open(ctx context.Context) (DB, error) {
 
 // parseAndLoad reads db_meta.json and constructs the in-memory DB.
 // Returns config, DB, and the internal engine (for StartOnline).
-func parseAndLoad(baseline fs.FS) (base.Config, DB, base.Engine, error) {
+// Baseline messages go to logger (log.Default() when nil), so the logger passed
+// to Option.Logger also covers load-time warnings.
+func parseAndLoad(baseline fs.FS, logger *log.Logger) (base.Config, DB, base.Engine, error) {
 	metaData, err := fs.ReadFile(baseline, "db_meta.json")
 	if err != nil {
 		return base.Config{}, nil, nil, fmt.Errorf("ghdb: read db_meta.json: %w", err)
@@ -211,6 +213,12 @@ func parseAndLoad(baseline fs.FS) (base.Config, DB, base.Engine, error) {
 	var cfg base.Config
 	if err := json.Unmarshal(metaData, &cfg); err != nil {
 		return base.Config{}, nil, nil, fmt.Errorf("ghdb: parse db_meta.json: %w", err)
+	}
+	if cfg.Mode == "" {
+		return base.Config{}, nil, nil, fmt.Errorf("ghdb: db_meta.json must set mode to \"table\" or \"graph\"")
+	}
+	if base.GetDataRepoPath(cfg) == "" {
+		return base.Config{}, nil, nil, fmt.Errorf("ghdb: db_meta.json must set name or data_repo_path so data has a repository path")
 	}
 	if cfg.MaxDeltaSegmentBytes < 0 || cfg.MaxDeltaSegmentBytes > base.MaxDeltaSegmentBytes {
 		return base.Config{}, nil, nil, fmt.Errorf("ghdb: max_delta_segment_bytes must be between 0 and %d", base.MaxDeltaSegmentBytes)
@@ -229,13 +237,13 @@ func parseAndLoad(baseline fs.FS) (base.Config, DB, base.Engine, error) {
 	var eng base.Engine
 	switch cfg.Mode {
 	case "table":
-		data, err := base.LoadTableState(baseline, cfg)
+		data, err := base.LoadTableStateWithLogger(baseline, cfg, logger)
 		if err != nil {
 			return base.Config{}, nil, nil, err
 		}
 		db, eng = table.New(cfg, data)
 	case "graph":
-		verts, edges, err := base.LoadGraphState(baseline, cfg)
+		verts, edges, err := base.LoadGraphStateWithLogger(baseline, cfg, logger)
 		if err != nil {
 			return base.Config{}, nil, nil, err
 		}
@@ -272,6 +280,7 @@ type Table = table.Table
 
 var ErrKeyMismatch = table.ErrKeyMismatch
 var ErrRequiredMissing = table.ErrRequiredMissing
+var ErrVertexIDMismatch = graph.ErrVertexIDMismatch
 var ErrOffline = base.ErrOffline
 
 type ErrMutationTooLarge = base.ErrMutationTooLarge

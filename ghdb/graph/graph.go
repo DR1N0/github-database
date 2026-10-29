@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -31,6 +32,45 @@ func validateJSONObject(value json.RawMessage, what string) error {
 	}
 	if obj == nil {
 		return fmt.Errorf("ghdb: %s must be a JSON object", what)
+	}
+	return nil
+}
+
+// ErrVertexIDMismatch is returned when a vertex value does not carry an "id"
+// string equal to the vertex id it is stored under. Checkpoint writes each
+// vertex label as a flat JSON array, so that field is the only key available
+// when the snapshot is loaded again: a value without a matching id would make
+// the checkpoint unloadable.
+var ErrVertexIDMismatch = errors.New("ghdb: vertex id mismatch")
+
+// vertexObject decodes a vertex value into a JSON object, rejecting anything else.
+func vertexObject(value json.RawMessage) (map[string]json.RawMessage, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(value, &obj); err != nil {
+		return nil, fmt.Errorf("ghdb: vertex value must be a JSON object: %w", err)
+	}
+	if obj == nil {
+		return nil, errors.New("ghdb: vertex value must be a JSON object")
+	}
+	return obj, nil
+}
+
+// validateVertexID checks that fields carries an "id" string equal to id.
+// When requirePresent is false (Patch), a missing id field is accepted.
+func validateVertexID(id string, fields map[string]json.RawMessage, requirePresent bool) error {
+	idRaw, ok := fields["id"]
+	if !ok {
+		if !requirePresent {
+			return nil
+		}
+		return fmt.Errorf("%w: vertex value for %q must contain an \"id\" field", ErrVertexIDMismatch, id)
+	}
+	var storedID string
+	if err := json.Unmarshal(idRaw, &storedID); err != nil {
+		return fmt.Errorf("ghdb: vertex id field must be a string: %w", err)
+	}
+	if storedID != id {
+		return fmt.Errorf("%w: Set id %q but id field is %q", ErrVertexIDMismatch, id, storedID)
 	}
 	return nil
 }
@@ -194,7 +234,8 @@ func (db *graphDB) SetEdge(label, from, to string, props json.RawMessage) error 
 			return err
 		}
 	}
-	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set_edge", From: from, Label: label, To: to, Value: props}
+	stored := base.CloneRawMessage(props)
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set_edge", From: from, Label: label, To: to, Value: stored}
 	if err := db.eng.ValidateMutation(record); err != nil {
 		return err
 	}
@@ -207,7 +248,7 @@ func (db *graphDB) SetEdge(label, from, to string, props json.RawMessage) error 
 	if db.edges[label][from] == nil {
 		db.edges[label][from] = map[string]json.RawMessage{}
 	}
-	db.edges[label][from][to] = props
+	db.edges[label][from][to] = stored
 	db.eng.UnlockData()
 	db.eng.AppendMutation(record)
 	db.eng.Logger().Printf("ghdb: set edge %s: %s→%s", label, from, to)
@@ -216,7 +257,8 @@ func (db *graphDB) SetEdge(label, from, to string, props json.RawMessage) error 
 
 // PatchEdge merges fields into the existing edge properties (upserts if absent).
 func (db *graphDB) PatchEdge(label, from, to string, fields map[string]json.RawMessage) error {
-	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch_edge", From: from, Label: label, To: to, Fields: fields}
+	copied := base.CloneRawMap(fields)
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch_edge", From: from, Label: label, To: to, Fields: copied}
 	if err := db.eng.ValidateMutation(record); err != nil {
 		return err
 	}
@@ -229,7 +271,7 @@ func (db *graphDB) PatchEdge(label, from, to string, fields map[string]json.RawM
 	if db.edges[label][from] == nil {
 		db.edges[label][from] = map[string]json.RawMessage{}
 	}
-	merged, err := base.JSONMerge(db.edges[label][from][to], fields)
+	merged, err := base.JSONMerge(db.edges[label][from][to], copied)
 	if err != nil {
 		db.eng.UnlockData()
 		return err
@@ -255,7 +297,10 @@ func (db *graphDB) GetEdge(label, from, to string) (json.RawMessage, bool) {
 		return nil, false
 	}
 	props, ok := toMap[to]
-	return props, ok
+	if !ok {
+		return nil, false
+	}
+	return base.CloneRawMessage(props), true
 }
 
 // OutEdges returns all outgoing edges from id via label, with their properties.
@@ -274,7 +319,7 @@ func (db *graphDB) OutEdges(label, id string) []EdgeResult {
 	var out []EdgeResult
 	for _, l := range labels {
 		for toID, props := range db.edges[l][id] {
-			out = append(out, EdgeResult{Label: l, From: id, To: toID, Props: props})
+			out = append(out, EdgeResult{Label: l, From: id, To: toID, Props: base.CloneRawMessage(props)})
 		}
 	}
 	return out
@@ -297,7 +342,7 @@ func (db *graphDB) InEdges(label, id string) []EdgeResult {
 	for _, l := range labels {
 		for fromID, targets := range db.edges[l] {
 			if props, ok := targets[id]; ok {
-				out = append(out, EdgeResult{Label: l, From: fromID, To: id, Props: props})
+				out = append(out, EdgeResult{Label: l, From: fromID, To: id, Props: base.CloneRawMessage(props)})
 			}
 		}
 	}
@@ -381,26 +426,37 @@ func (db *graphDB) InNeighbors(label, id string) []string {
 }
 
 // Get returns the raw JSON record for id, and whether it exists.
+// The returned bytes are an independent copy of database state.
 func (vs *vertexSet) Get(id string) (json.RawMessage, bool) {
 	vs.db.eng.RLockData()
 	defer vs.db.eng.RUnlockData()
 	v, ok := vs.data[id]
-	return v, ok
+	if !ok {
+		return nil, false
+	}
+	return base.CloneRawMessage(v), true
 }
 
 // Set writes value under id and buffers a mutation record.
+// value must be a JSON object whose "id" field is a string equal to id;
+// otherwise ErrVertexIDMismatch is returned. The database keeps its own copy.
 func (vs *vertexSet) Set(id string, value json.RawMessage) error {
-	if err := validateJSONObject(value, "vertex value"); err != nil {
+	obj, err := vertexObject(value)
+	if err != nil {
 		return err
 	}
-	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set_vertex", Label: vs.label, ID: id, Value: value}
+	if err := validateVertexID(id, obj, true); err != nil {
+		return err
+	}
+	stored := base.CloneRawMessage(value)
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set_vertex", Label: vs.label, ID: id, Value: stored}
 	if err := vs.db.eng.ValidateMutation(record); err != nil {
 		return err
 	}
 	vs.db.eng.LockCkptRead()
 	defer vs.db.eng.UnlockCkptRead()
 	vs.db.eng.LockData()
-	vs.data[id] = value
+	vs.data[id] = stored
 	vs.db.eng.UnlockData()
 	vs.db.eng.AppendMutation(record)
 	vs.db.eng.Logger().Printf("ghdb: set vertex/%s/%s", vs.label, id)
@@ -408,15 +464,20 @@ func (vs *vertexSet) Set(id string, value json.RawMessage) error {
 }
 
 // Patch merges fields into the existing vertex record (upsert if absent) and buffers a mutation.
+// If fields contains "id", it must equal id.
 func (vs *vertexSet) Patch(id string, fields map[string]json.RawMessage) error {
-	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch_vertex", Label: vs.label, ID: id, Fields: fields}
+	if err := validateVertexID(id, fields, false); err != nil {
+		return err
+	}
+	copied := base.CloneRawMap(fields)
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch_vertex", Label: vs.label, ID: id, Fields: copied}
 	if err := vs.db.eng.ValidateMutation(record); err != nil {
 		return err
 	}
 	vs.db.eng.LockCkptRead()
 	defer vs.db.eng.UnlockCkptRead()
 	vs.db.eng.LockData()
-	merged, err := base.JSONMerge(vs.data[id], fields)
+	merged, err := base.JSONMerge(vs.data[id], copied)
 	if err != nil {
 		vs.db.eng.UnlockData()
 		return err
@@ -467,13 +528,14 @@ func (vs *vertexSet) Delete(id string) error {
 	return nil
 }
 
-// All returns a snapshot copy of all vertex records.
+// All returns a deep copy of all vertex records: both the map and every value
+// are independent of database state.
 func (vs *vertexSet) All() map[string]json.RawMessage {
 	vs.db.eng.RLockData()
 	defer vs.db.eng.RUnlockData()
 	out := make(map[string]json.RawMessage, len(vs.data))
 	for k, v := range vs.data {
-		out[k] = v
+		out[k] = base.CloneRawMessage(v)
 	}
 	return out
 }
@@ -488,7 +550,11 @@ func applyToGraphDB(vertices map[string]*vertexSet, edges map[string]map[string]
 		if !ok {
 			return fmt.Errorf("ghdb: unknown vertex label %q", r.Label)
 		}
-		if err := validateJSONObject(r.Value, "vertex value"); err != nil {
+		obj, err := vertexObject(r.Value)
+		if err != nil {
+			return err
+		}
+		if err := validateVertexID(r.ID, obj, true); err != nil {
 			return err
 		}
 		vs.data[r.ID] = r.Value
@@ -496,6 +562,9 @@ func applyToGraphDB(vertices map[string]*vertexSet, edges map[string]map[string]
 		vs, ok := vertices[r.Label]
 		if !ok {
 			return fmt.Errorf("ghdb: unknown vertex label %q", r.Label)
+		}
+		if err := validateVertexID(r.ID, r.Fields, false); err != nil {
+			return err
 		}
 		merged, err := base.JSONMerge(vs.data[r.ID], r.Fields)
 		if err != nil {

@@ -11,7 +11,7 @@ func TestLoadJSONTable(t *testing.T) {
 		"tables/components.json": {Data: []byte(`{"svc-a":{"name":"svc-a","version":"1.0"},"svc-b":{"name":"svc-b","version":"2.0"}}`)},
 	}
 	cfg := Config{Tables: []TableSpec{{Name: "components", Key: "name"}}}
-	tables, err := loadTableState(fsys, cfg)
+	tables, err := loadTableState(fsys, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestLoadJSONTable(t *testing.T) {
 func TestLoadTableMissingFileIsEmpty(t *testing.T) {
 	fsys := fstest.MapFS{} // no files
 	cfg := Config{Tables: []TableSpec{{Name: "missing", Key: "id"}}}
-	tables, err := loadTableState(fsys, cfg)
+	tables, err := loadTableState(fsys, cfg, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestLoadMultipleTables(t *testing.T) {
 		{Name: "a", Key: "id"},
 		{Name: "b", Key: "id"},
 	}}
-	tables, err := loadTableState(fsys, cfg)
+	tables, err := loadTableState(fsys, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestLoadGraphVertices(t *testing.T) {
 		Vertices: []VertexSpec{{Label: "component"}},
 		Edges:    []EdgeSpec{},
 	}
-	verts, edges, err := loadGraphState(fsys, cfg)
+	verts, edges, err := loadGraphState(fsys, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestLoadGraphEdges(t *testing.T) {
 		Vertices: []VertexSpec{},
 		Edges:    []EdgeSpec{{Label: "sourcerepo"}},
 	}
-	_, edges, err := loadGraphState(fsys, cfg)
+	_, edges, err := loadGraphState(fsys, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestLoadGraphMissingFilesAreEmpty(t *testing.T) {
 		Vertices: []VertexSpec{{Label: "component"}},
 		Edges:    []EdgeSpec{{Label: "dep"}},
 	}
-	verts, edges, err := loadGraphState(fsys, cfg)
+	verts, edges, err := loadGraphState(fsys, cfg, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

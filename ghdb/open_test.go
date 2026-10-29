@@ -103,7 +103,7 @@ func TestOpenDefaultDeltaSegmentConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			baseline := testBaseline(t)
 			baseline["db_meta.json"] = &fstest.MapFile{Data: tc.meta}
-			cfg, _, _, err := parseAndLoad(baseline)
+			cfg, _, _, err := parseAndLoad(baseline, nil)
 			if err != nil {
 				t.Fatalf("parseAndLoad: %v", err)
 			}
