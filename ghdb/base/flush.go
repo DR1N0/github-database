@@ -191,7 +191,14 @@ func rolloverSegmentName(instanceID string, now time.Time, used map[string]struc
 
 // flush drains the write buffer and writes bounded instance JSONL segments on delta_branch.
 // If nextVerExists is true, migrates writeVer to cfg.Version+1 before writing.
+//
+// flushMu serializes concurrent callers: the background flusher and Checkpoint
+// both drain the same write buffer, and two overlapping runs would read the same
+// active segment SHA and then race on PutFile.
 func (b *baseDB) flush(ctx context.Context) error {
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
+
 	b.wbufMu.Lock()
 	if len(b.wbuf) == 0 {
 		b.wbufMu.Unlock()

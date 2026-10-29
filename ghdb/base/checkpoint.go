@@ -30,7 +30,10 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	if b.hasCheckpointed {
 		return fmt.Errorf("ghdb: Checkpoint already performed; restart instance for next version")
 	}
-	b.hasCheckpointed = true
+
+	// hasCheckpointed is only set once every step has succeeded, so a failed
+	// checkpoint (network error, bad credentials, cancelled context) can be
+	// retried on the same instance instead of requiring a restart.
 
 	if err := b.flush(ctx); err != nil {
 		return fmt.Errorf("ghdb: checkpoint flush: %w", err)
@@ -62,8 +65,14 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	}
 
 	snapshotBranch := fmt.Sprintf("ghdb-ckpt-%s-v%d", b.cfg.Name, nextVer)
+	// A previous failed attempt may have left the snapshot branch behind. Reuse
+	// it instead of failing: UpdateRef below force-moves it to the new commit.
 	if err := b.forkGH.CreateBranch(ctx, snapshotBranch, mainSHA); err != nil {
-		return fmt.Errorf("ghdb: checkpoint: create snapshot branch: %w", err)
+		exists, existsErr := b.forkGH.BranchExists(ctx, snapshotBranch)
+		if existsErr != nil || !exists {
+			return fmt.Errorf("ghdb: checkpoint: create snapshot branch: %w", err)
+		}
+		b.Logger().Printf("ghdb: checkpoint: reusing existing snapshot branch %q", snapshotBranch)
 	}
 
 	// Serialize the next db_meta.json.
@@ -126,6 +135,7 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	b.nextVerExists = true
 	b.writeVer = nextVer
 	b.mu.Unlock()
+	b.hasCheckpointed = true
 
 	return nil
 }

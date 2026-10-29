@@ -32,9 +32,12 @@ func (b *baseDB) StartOnline(ctx context.Context, baseGH, forkGH github.Interfac
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	cfg := b.cfg
+	if cfg.BaseRepo == "" {
+		return fmt.Errorf("ghdb: base_repo is required for online mode")
+	}
 	b.baseGH = baseGH
 	b.forkGH = forkGH
-	cfg := b.cfg
 
 	_, mainSHA, err := resolveSourceBranch(ctx, baseGH, cfg)
 	if err != nil {
@@ -162,7 +165,10 @@ func (b *baseDB) StartOnline(ctx context.Context, baseGH, forkGH github.Interfac
 		writeVer = cfg.Version + 1
 	}
 
-	instanceID := deriveInstanceID(b.Logger())
+	instanceID, err := deriveInstanceID(b.Logger())
+	if err != nil {
+		return err
+	}
 	b.mu.Lock()
 	b.instanceID = instanceID
 	b.writeVer = writeVer
@@ -198,6 +204,9 @@ type baseDB struct {
 	mu     sync.RWMutex
 	wbuf   []MutationRecord
 	wbufMu sync.Mutex
+	// flushMu serializes flush so the background flusher and Checkpoint cannot
+	// drain the same buffer concurrently. Guard order: ckptMu -> flushMu -> mu.
+	flushMu sync.Mutex
 
 	// ckptMu: writes hold RLock; Checkpoint holds Lock (steps 0-3)
 	ckptMu sync.RWMutex
@@ -425,22 +434,25 @@ func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath stri
 	return nil
 }
 
-func deriveInstanceID(logger *log.Logger) string {
+// deriveInstanceID picks the identifier that names this instance's delta
+// segments. It reports an error rather than panicking, because this package is
+// a library and a caller cannot recover from a panic it did not initiate.
+func deriveInstanceID(logger *log.Logger) (string, error) {
 	if v := os.Getenv("POD_NAME"); v != "" {
 		logger.Printf("ghdb: instance ID from POD_NAME: %s", v)
-		return v
+		return v, nil
 	}
 	if h, err := os.Hostname(); err == nil {
 		logger.Printf("ghdb: instance ID from hostname: %s", h)
-		return h
+		return h, nil
 	}
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		panic("ghdb: crypto/rand failed: " + err.Error())
+		return "", fmt.Errorf("ghdb: instance ID: crypto/rand failed: %w", err)
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 	id := fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 	logger.Printf("ghdb: instance ID from random UUID: %s", id)
-	return id
+	return id, nil
 }
