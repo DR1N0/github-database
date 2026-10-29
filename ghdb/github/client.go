@@ -23,6 +23,12 @@ var ErrNotFound = errors.New("ghdb: not found")
 // permanent failure.
 var ErrRateLimited = errors.New("ghdb: GitHub API rate limit exceeded")
 
+// ErrConflict is returned when a conditional write loses a compare-and-swap:
+// GitHub answers 409 when the supplied file SHA no longer matches the current
+// content, and 422 when a create omits the SHA of an existing file. Callers use
+// it to notice that another writer got there first.
+var ErrConflict = errors.New("ghdb: conflict")
+
 // userAgent identifies this client. GitHub rejects requests without a
 // User-Agent, and a stable value makes the library's traffic attributable.
 const userAgent = "github-database-ghdb/1 (+https://github.com/DR1N0/github-database)"
@@ -162,6 +168,9 @@ func (c *httpClient) httpError(op, detail string, resp *http.Response) error {
 		(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0")
 	if rateLimited {
 		return &RateLimitError{Operation: target, ResetAt: rateLimitReset(resp)}
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("%w: %s: HTTP %d%s", ErrConflict, target, resp.StatusCode, readErrorBody(resp))
 	}
 	return fmt.Errorf("ghdb: %s: HTTP %d%s", target, resp.StatusCode, readErrorBody(resp))
 }

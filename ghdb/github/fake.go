@@ -3,7 +3,6 @@ package github
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -190,8 +189,11 @@ func (fc *FakeClient) PutFile(_ context.Context, branch, p, _ string, content []
 		fc.files[branch] = map[string]*fileEntry{}
 	}
 	existing := fc.files[branch][p]
+	if existing != nil && currentSHA == "" {
+		return fmt.Errorf("%w: fake: %s already exists", ErrConflict, p)
+	}
 	if currentSHA != "" && (existing == nil || existing.sha != currentSHA) {
-		return errors.New("fake: SHA mismatch")
+		return fmt.Errorf("%w: fake: SHA mismatch for %s", ErrConflict, p)
 	}
 	cp := make([]byte, len(content))
 	copy(cp, content)
