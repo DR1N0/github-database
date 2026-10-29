@@ -195,6 +195,7 @@ func (db *graphDB) Schema() GraphSchema {
 	cfg := db.eng.GetConfig()
 	return GraphSchema{Vertices: cfg.Vertices, Edges: cfg.Edges}
 }
+
 // Vertex returns the labelled vertex set, or ErrUnknownVertex.
 func (db *graphDB) Vertex(label string) (VertexSet, error) {
 	vs, ok := db.vertices[label]
