@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -53,8 +54,11 @@ func TestConfiguredRequestTimeoutPrecedesCallerDeadline(t *testing.T) {
 
 	started := time.Now()
 	_, _, err := client.GetFile(ctx, "main", "late.jsonl")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("GetFile error = %v, want request deadline exceeded", err)
+	// Go versions before 1.23 report an http.Client.Timeout expiry as a net.Error
+	// that does not wrap context.DeadlineExceeded; newer versions wrap it.
+	var timeoutErr net.Error
+	if !errors.Is(err, context.DeadlineExceeded) && !(errors.As(err, &timeoutErr) && timeoutErr.Timeout()) {
+		t.Fatalf("GetFile error = %v, want a request timeout", err)
 	}
 	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
 		t.Fatalf("GetFile returned after %v, want configured request timeout before caller deadline", elapsed)
