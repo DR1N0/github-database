@@ -71,8 +71,15 @@ func TestClientReportsRateLimit(t *testing.T) {
 	if !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("error = %v, want ErrRateLimited", err)
 	}
-	if !strings.Contains(err.Error(), "1700000000") {
-		t.Errorf("error = %v, want the reset timestamp", err)
+	var rateLimit *RateLimitError
+	if !errors.As(err, &rateLimit) {
+		t.Fatalf("error = %v, want a *RateLimitError", err)
+	}
+	if got := rateLimit.ResetAt.Unix(); got != 1700000000 {
+		t.Errorf("ResetAt = %d, want 1700000000", got)
+	}
+	if rateLimit.Operation == "" {
+		t.Error("Operation is empty, want the failing call")
 	}
 }
 

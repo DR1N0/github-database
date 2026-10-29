@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -111,9 +112,47 @@ func readErrorBody(resp *http.Response) string {
 	return ": " + snippet
 }
 
+// RateLimitError reports an exhausted GitHub quota. It satisfies
+// errors.Is(err, ErrRateLimited); ResetAt is when the quota replenishes, or the
+// zero time when GitHub did not say.
+type RateLimitError struct {
+	Operation string
+	ResetAt   time.Time
+}
+
+func (e *RateLimitError) Error() string {
+	msg := "ghdb: " + e.Operation + ": GitHub API rate limit exceeded"
+	if !e.ResetAt.IsZero() {
+		msg += " (resets at " + e.ResetAt.Format(time.RFC3339) + ")"
+	}
+	return msg
+}
+
+// Is makes errors.Is(err, ErrRateLimited) hold for a typed error.
+func (e *RateLimitError) Is(target error) bool { return target == ErrRateLimited }
+
+// rateLimitReset returns when the quota replenishes, read from X-RateLimit-Reset
+// or Retry-After. A zero time means GitHub did not say.
+func rateLimitReset(resp *http.Response) time.Time {
+	if v := resp.Header.Get("X-RateLimit-Reset"); v != "" {
+		if sec, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return time.Unix(sec, 0).UTC()
+		}
+	}
+	if v := resp.Header.Get("Retry-After"); v != "" {
+		if sec, err := strconv.Atoi(v); err == nil {
+			return time.Now().UTC().Add(time.Duration(sec) * time.Second)
+		}
+		if t, err := http.ParseTime(v); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
 // httpError builds the error for an unexpected response. An exhausted quota is
-// reported as ErrRateLimited so callers can tell "retry later" from "this will
-// never work".
+// reported as a *RateLimitError so callers can tell "retry later" from "this
+// will never work", and can schedule the retry for the moment it becomes valid.
 func (c *httpClient) httpError(op, detail string, resp *http.Response) error {
 	target := op
 	if detail != "" {
@@ -122,7 +161,7 @@ func (c *httpClient) httpError(op, detail string, resp *http.Response) error {
 	rateLimited := resp.StatusCode == http.StatusTooManyRequests ||
 		(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0")
 	if rateLimited {
-		return fmt.Errorf("ghdb: %s: %w (resets at %s)", target, ErrRateLimited, resp.Header.Get("X-RateLimit-Reset"))
+		return &RateLimitError{Operation: target, ResetAt: rateLimitReset(resp)}
 	}
 	return fmt.Errorf("ghdb: %s: HTTP %d%s", target, resp.StatusCode, readErrorBody(resp))
 }
@@ -280,6 +319,21 @@ func pathSegments(p string) []string {
 	return strings.Split(trimmed, "/")
 }
 
+// branchTreeRef returns a reference to the branch's root tree. A plain branch
+// name can be handed to the trees endpoint as a ref, but a name containing "/"
+// cannot: the slash inside the URL path would be read as another path segment.
+// Such a branch is resolved to its head commit and that commit's tree instead.
+func (c *httpClient) branchTreeRef(ctx context.Context, branch string) (string, error) {
+	if !strings.Contains(branch, "/") {
+		return branch, nil
+	}
+	commit, err := c.GetBranchHead(ctx, branch)
+	if err != nil {
+		return "", err
+	}
+	return c.GetCommitTree(ctx, commit)
+}
+
 // ListDir lists the direct child files of a directory path on a branch.
 // Returns an empty slice (no error) if the branch or path does not exist.
 //
@@ -288,7 +342,13 @@ func pathSegments(p string) []string {
 // eventually exceeds; trees have a far higher ceiling, and every level of the
 // walk is an immutable object so the listing is self-consistent.
 func (c *httpClient) ListDir(ctx context.Context, branch, path string) ([]DirEntry, error) {
-	ref := branch
+	ref, err := c.branchTreeRef(ctx, branch)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
 	for _, segment := range pathSegments(path) {
 		entries, err := c.listTree(ctx, ref)
 		if err != nil {
@@ -327,7 +387,7 @@ func (c *httpClient) ListDir(ctx context.Context, branch, path string) ([]DirEnt
 
 // BranchExists returns true if the branch exists in the repo.
 func (c *httpClient) BranchExists(ctx context.Context, name string) (bool, error) {
-	resp, err := c.do(ctx, http.MethodGet, c.apiURL("/branches/"+name), nil)
+	resp, err := c.do(ctx, http.MethodGet, c.apiURL("/branches/"+url.PathEscape(name)), nil)
 	if err != nil {
 		return false, err
 	}
@@ -386,7 +446,7 @@ func (c *httpClient) DefaultBranch(ctx context.Context) (string, string, error) 
 // GetBranchHead returns the HEAD commit SHA of the named branch.
 // Returns ErrNotFound if the branch does not exist (HTTP 404).
 func (c *httpClient) GetBranchHead(ctx context.Context, branch string) (string, error) {
-	resp, err := c.do(ctx, http.MethodGet, c.apiURL("/branches/"+branch), nil)
+	resp, err := c.do(ctx, http.MethodGet, c.apiURL("/branches/"+url.PathEscape(branch)), nil)
 	if err != nil {
 		return "", err
 	}
