@@ -117,7 +117,10 @@ When `CommitSigner` is set, each checkpoint commit is signed and GitHub shows a 
 ### 4. Read and write
 
 ```go
-tbl := db.Table("user_info")
+tbl, err := db.Table("user_info") // ghdb.ErrUnknownTable when not declared
+if err != nil {
+    return err
+}
 
 // Write
 tbl.Set("alice", json.RawMessage(`{"username":"alice","role":"admin"}`))
@@ -129,7 +132,7 @@ val, ok := tbl.Get("alice")
 all := tbl.All()
 ```
 
-`Set` enforces key-field consistency and `required` columns. Both `Set` and `Patch` return typed sentinel errors (`ghdb.ErrKeyMismatch`, `ghdb.ErrRequiredMissing`) that you can check with `errors.Is`.
+`Table` and `Vertex` return an error instead of a nil value, so a typo in a table or label name surfaces immediately rather than panicking on the first call. `Set` enforces key-field consistency and `required` columns. Both `Set` and `Patch` return typed sentinel errors (`ghdb.ErrKeyMismatch`, `ghdb.ErrRequiredMissing`) that you can check with `errors.Is`.
 
 ### 5. Checkpoint
 
@@ -158,7 +161,10 @@ Set `"mode": "graph"` and declare vertices and edges. Vertices live in `vertices
 ```go
 db, err := ghdb.NewOption(sub).Token(func() string { return os.Getenv("GITHUB_TOKEN") }).OpenGraph(ctx)
 
-svc := db.Vertex("service")
+svc, err := db.Vertex("service") // ghdb.ErrUnknownVertex when not declared
+if err != nil {
+    return err
+}
 svc.Set("svc-a", json.RawMessage(`{"id":"svc-a","name":"payments"}`)) // id must equal the key
 svc.Patch("svc-a", map[string]json.RawMessage{"name": json.RawMessage(`"billing"`)})
 
@@ -219,9 +225,9 @@ The example runs an HTTP server on `:8080` with endpoints:
 
 - **Delta history is never pruned.** Each checkpoint starts a new version directory; older version directories stay on `delta_branch` indefinitely. A long-running instance also appends a new segment file every flush, so each version directory keeps growing. Plan storage and PR-history growth, or archive/delete old version directories yourself once the checkpoint's pull request is merged.
 - **Last write wins on timestamps.** Replay applies records in timestamp order, and each instance skips records at or before the newest timestamp it has applied. Instances need reasonably synchronized clocks; a large skew makes one instance drop another's writes.
-- **No automatic retries.** A failed GitHub request surfaces immediately; flushing and polling retry on their next interval. An exhausted quota is reported as `github.ErrRateLimited` (check with `errors.Is`) so a caller can tell "retry later" from "this will never work".
-- **Directory listings use git trees.** `ListDir` walks `GET /git/trees` instead of the contents API, so a version directory is not capped at the contents API's 1,000 entries. A listing GitHub truncates (`"truncated": true`) is reported as an error rather than silently dropping segments.
-- **API budget.** A directory listing costs one request per path level plus the listing itself (three requests for `<data_repo_path>/v<N>`), and every flush costs a listing plus one file update. Every poll lists each active version directory. Intervals are floored at 10 s to stay clear of rate limits.
+- **No automatic retries, but an exhausted quota pauses background work.** A failed GitHub request surfaces immediately; flushing and polling retry on their next interval. An exhausted quota is returned as `github.RateLimitError`, which still matches `errors.Is(err, github.ErrRateLimited)` and carries the reset time; while that time is within 15 minutes, the background flusher and poller skip their ticks instead of spending requests that cannot succeed. An explicit `Checkpoint` still returns the error to its caller.
+- **Directory listings use git trees.** `ListDir` walks `GET /git/trees` instead of the contents API, so a version directory is not capped at the contents API's 1,000 entries. Branch names containing `/` are resolved through the branch head commit first, because a slash cannot appear inside the trees path segment. A listing GitHub truncates (`"truncated": true`) is reported as an error rather than silently dropping segments.
+- **API budget.** A directory listing costs one request per path level plus the listing itself (three requests for `<data_repo_path>/v<N>`, five for a branch name containing `/`), and every flush costs a listing plus one file update. Every poll lists each active version directory. Intervals are floored at 10 s to stay clear of rate limits.
 - **Checkpoint size.** Snapshots are submitted inline through the git trees API, so very large databases may exceed GitHub's payload limits.
 
 ## Development
