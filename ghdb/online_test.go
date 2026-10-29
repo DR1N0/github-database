@@ -19,6 +19,7 @@ import (
 
 	"github.com/DR1N0/github-database/ghdb"
 	"github.com/DR1N0/github-database/ghdb/github"
+	"github.com/DR1N0/github-database/ghdb/internal/githubtest"
 )
 
 // onlineBaseline builds a minimal table baseline for online tests.
@@ -36,9 +37,9 @@ func onlineBaseline(t *testing.T) fstest.MapFS {
 }
 
 // newOnlineFake creates a FakeClient with delta_branch pre-created.
-func newOnlineFake(t *testing.T) (*github.FakeClient, fstest.MapFS) {
+func newOnlineFake(t *testing.T) (*githubtest.FakeClient, fstest.MapFS) {
 	t.Helper()
-	fc := &github.FakeClient{}
+	fc := &githubtest.FakeClient{}
 	if err := fc.CreateBranch(context.Background(), "ghdb-data", "sha0"); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +251,7 @@ func onlineBaselineAtVersion(t *testing.T, version int) fstest.MapFS {
 	}
 }
 
-func seedStartupSegments(t *testing.T, fc *github.FakeClient, version, count int, includeMalformed bool) {
+func seedStartupSegments(t *testing.T, fc *githubtest.FakeClient, version, count int, includeMalformed bool) {
 	t.Helper()
 	for segment := 1; segment <= count; segment++ {
 		record := ghdb.MutationRecord{
@@ -562,7 +563,7 @@ func TestStartupFailureStopsProgress(t *testing.T) {
 }
 
 func TestOpenOnlineCreatesBranch(t *testing.T) {
-	fc := &github.FakeClient{}
+	fc := &githubtest.FakeClient{}
 	db, err := ghdb.OpenWithClient(onlineBaseline(t), fc)
 	if err != nil {
 		t.Fatal(err)
@@ -937,7 +938,7 @@ func TestPollSkipsUnchangedStartupSegments(t *testing.T) {
 
 func TestPollUsesBaselineWatermarkForStartupSegments(t *testing.T) {
 	cutoff := time.Date(2026, 9, 2, 1, 0, 0, 0, time.UTC)
-	fc := &github.FakeClient{}
+	fc := &githubtest.FakeClient{}
 	if err := fc.CreateBranch(context.Background(), "ghdb-data", "sha0"); err != nil {
 		t.Fatal(err)
 	}
@@ -1139,7 +1140,7 @@ func TestCommitSignerRequiresCommitter(t *testing.T) {
 	}
 
 	// Direct call without Committer must fail.
-	_, err = ghdb.OpenWithClient(bl, &github.FakeClient{})
+	_, err = ghdb.OpenWithClient(bl, &githubtest.FakeClient{})
 	if err != nil {
 		t.Fatalf("open without signer should succeed: %v", err)
 	}
@@ -1157,7 +1158,7 @@ func TestCommitSignerWithoutCommitterFails(t *testing.T) {
 }
 
 func TestOpenOnlineBaselineTimeCutoff(t *testing.T) {
-	fc := &github.FakeClient{}
+	fc := &githubtest.FakeClient{}
 	if err := fc.CreateBranch(context.Background(), "ghdb-data", "sha0"); err != nil {
 		t.Fatal(err)
 	}
@@ -1209,9 +1210,9 @@ func onlineBaselineWithSegmentCaps(t *testing.T, maxBytes, maxRecords int) fstes
 	}
 }
 
-func openOnlineWithSegmentCaps(t *testing.T, maxBytes, maxRecords int) (*github.FakeClient, ghdb.DB) {
+func openOnlineWithSegmentCaps(t *testing.T, maxBytes, maxRecords int) (*githubtest.FakeClient, ghdb.DB) {
 	t.Helper()
-	fc := &github.FakeClient{}
+	fc := &githubtest.FakeClient{}
 	if err := fc.CreateBranch(context.Background(), "ghdb-data", "sha0"); err != nil {
 		t.Fatal(err)
 	}
@@ -1233,7 +1234,7 @@ func setSegmentRecord(t *testing.T, db ghdb.DB, key string, padding int) {
 	}
 }
 
-func segmentContents(t *testing.T, fc *github.FakeClient, instanceID string) map[string][]byte {
+func segmentContents(t *testing.T, fc *githubtest.FakeClient, instanceID string) map[string][]byte {
 	t.Helper()
 	entries, err := fc.ListDir(context.Background(), "ghdb-data", "testdb/v1")
 	if err != nil {
@@ -1696,7 +1697,7 @@ func TestOpenNextVersionListDirFailureDoesNotActivateOnline(t *testing.T) {
 func TestOpenCancellationFromStartupProgressStopsLaterGitHubCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		seed     func(t *testing.T, fc *github.FakeClient)
+		seed     func(t *testing.T, fc *githubtest.FakeClient)
 		cancelOn func(event ghdb.StartupProgress, seen map[ghdb.StartupProgress]int) bool
 		assert   func(t *testing.T, calls []string)
 	}{
@@ -1724,7 +1725,7 @@ func TestOpenCancellationFromStartupProgressStopsLaterGitHubCalls(t *testing.T) 
 		},
 		{
 			name: "bounded replay segment",
-			seed: func(t *testing.T, fc *github.FakeClient) {
+			seed: func(t *testing.T, fc *githubtest.FakeClient) {
 				seedStartupSegments(t, fc, 1, 11, false)
 			},
 			cancelOn: func(event ghdb.StartupProgress, _ map[ghdb.StartupProgress]int) bool {
@@ -1749,7 +1750,7 @@ func TestOpenCancellationFromStartupProgressStopsLaterGitHubCalls(t *testing.T) 
 		},
 		{
 			name: "next version replay listing",
-			seed: func(t *testing.T, fc *github.FakeClient) {
+			seed: func(t *testing.T, fc *githubtest.FakeClient) {
 				seedStartupSegments(t, fc, 2, 1, false)
 			},
 			cancelOn: func(event ghdb.StartupProgress, seen map[ghdb.StartupProgress]int) bool {

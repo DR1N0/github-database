@@ -115,6 +115,34 @@ func (b *baseDB) putCheckpointLease(ctx context.Context, path string, lease chec
 	return b.forkGH.PutFile(ctx, b.cfg.DeltaBranch, path, message, data, sha)
 }
 
+// renewCheckpointLease extends the lease before a long step. It fails when the
+// lease is no longer ours: another instance took over after the window expired,
+// and continuing would produce a second snapshot for the same version.
+func (b *baseDB) renewCheckpointLease(ctx context.Context, path string) error {
+	raw, sha, err := b.forkGH.GetFile(ctx, b.cfg.DeltaBranch, path)
+	if err != nil {
+		return fmt.Errorf("ghdb: checkpoint: renew lease: %w", err)
+	}
+	var lease checkpointLease
+	if err := json.Unmarshal(raw, &lease); err != nil {
+		return fmt.Errorf("ghdb: checkpoint: parse lease %s: %w", path, err)
+	}
+	if lease.Done {
+		return fmt.Errorf("%w: %s completed this version while we were checkpointing", ErrCheckpointTaken, lease.Owner)
+	}
+	if lease.Owner != b.instanceID {
+		return fmt.Errorf("%w: %s took over the lease for %s", ErrCheckpointBusy, lease.Owner, path)
+	}
+	lease.AcquiredAt = time.Now().UTC()
+	if err := b.putCheckpointLease(ctx, path, lease, sha); err != nil {
+		if isLeaseConflict(err) {
+			return fmt.Errorf("%w: lost the checkpoint lease for %s", ErrCheckpointBusy, path)
+		}
+		return fmt.Errorf("ghdb: checkpoint: renew lease: %w", err)
+	}
+	return nil
+}
+
 // markCheckpointLeaseDone records that nextVer has a completed snapshot. A
 // failure here is not fatal: the lease expires on its own, and the snapshot
 // pull request is what actually carries the new baseline.
@@ -175,6 +203,9 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	if err := b.flush(ctx); err != nil {
 		return fmt.Errorf("ghdb: checkpoint flush: %w", err)
 	}
+	if err := b.renewCheckpointLease(ctx, leasePath); err != nil {
+		return err
+	}
 
 	b.mu.RLock()
 	modeFiles, err := b.snapshotFn()
@@ -228,6 +259,11 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	}
 	allFiles[prefix+"/db_meta.json"] = dbMetaContent
 
+	// Uploading a snapshot is the slowest step; renew first so a large database
+	// does not lose the lease while its tree is being built.
+	if err := b.renewCheckpointLease(ctx, leasePath); err != nil {
+		return err
+	}
 	treeSHA, err := b.forkGH.CreateTree(ctx, mainTreeSHA, allFiles)
 	if err != nil {
 		return fmt.Errorf("ghdb: checkpoint: create tree: %w", err)
@@ -246,6 +282,11 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 		}
 	}
 
+	// The tree upload may have consumed most of the window; renew again before
+	// the commit so the lease cannot expire mid-checkpoint.
+	if err := b.renewCheckpointLease(ctx, leasePath); err != nil {
+		return err
+	}
 	commitSHA, err := b.forkGH.CreateCommit(ctx, treeSHA, mainSHA, message, b.committerName, b.committerEmail, ts, signature)
 	if err != nil {
 		return fmt.Errorf("ghdb: checkpoint: create commit: %w", err)

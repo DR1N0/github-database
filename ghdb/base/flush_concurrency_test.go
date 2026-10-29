@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DR1N0/github-database/ghdb/github"
+	"github.com/DR1N0/github-database/ghdb/internal/githubtest"
 )
 
 // TestConcurrentFlushKeepsEveryRecordOnce covers the flush mutex: the background
 // flusher and Checkpoint can both drain the write buffer, and overlapping runs
 // used to read the same active segment SHA and race on PutFile.
 func TestConcurrentFlushKeepsEveryRecordOnce(t *testing.T) {
-	client := &github.FakeClient{}
+	client := &githubtest.FakeClient{}
 	cfg := Config{
 		Name:                   "d",
 		Version:                1,

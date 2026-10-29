@@ -6,7 +6,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/DR1N0/github-database/ghdb/github"
+	"github.com/DR1N0/github-database/ghdb/internal/githubtest"
 )
 
 // baselineWith replaces db_meta.json in a minimal baseline.
@@ -40,7 +40,7 @@ func TestOpenRejectsMetaWithoutRepositoryPath(t *testing.T) {
 func TestOnlineRequiresBaseRepo(t *testing.T) {
 	// A token/client is configured, so startup goes online, but base_repo is empty.
 	baseline := baselineWith(`{"name":"db","version":1,"mode":"table","delta_branch":"d","tables":[{"name":"things","key":"id"}]}`)
-	if _, err := OpenWithClient(baseline, &github.FakeClient{}); err == nil {
+	if _, err := OpenWithClient(baseline, &githubtest.FakeClient{}); err == nil {
 		t.Fatal("online Open with empty base_repo succeeded")
 	} else if !strings.Contains(err.Error(), "base_repo") {
 		t.Fatalf("error = %v, want it to mention base_repo", err)

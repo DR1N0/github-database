@@ -1,4 +1,4 @@
-package github
+package githubtest
 
 import (
 	"context"
@@ -9,9 +9,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/DR1N0/github-database/ghdb/github"
 )
 
-var _ Interface = (*FakeClient)(nil)
+var _ github.Interface = (*FakeClient)(nil)
 
 // PRRecord holds the details of a PR created via FakeClient.CreatePR.
 type PRRecord struct {
@@ -147,7 +149,7 @@ func (fc *FakeClient) CreateBranch(_ context.Context, name, fromSHA string) erro
 	return nil
 }
 
-// GetFile retrieves file content and its SHA. Returns ghdb.ErrNotFound if absent.
+// GetFile retrieves file content and its SHA. Returns ghdb.github.ErrNotFound if absent.
 func (fc *FakeClient) GetFile(_ context.Context, branch, p string) ([]byte, string, error) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -160,11 +162,11 @@ func (fc *FakeClient) GetFile(_ context.Context, branch, p string) ([]byte, stri
 	}
 	bf := fc.files[branch]
 	if bf == nil {
-		return nil, "", ErrNotFound
+		return nil, "", github.ErrNotFound
 	}
 	e := bf[p]
 	if e == nil {
-		return nil, "", ErrNotFound
+		return nil, "", github.ErrNotFound
 	}
 	cp := make([]byte, len(e.content))
 	copy(cp, e.content)
@@ -190,10 +192,10 @@ func (fc *FakeClient) PutFile(_ context.Context, branch, p, _ string, content []
 	}
 	existing := fc.files[branch][p]
 	if existing != nil && currentSHA == "" {
-		return fmt.Errorf("%w: fake: %s already exists", ErrConflict, p)
+		return fmt.Errorf("%w: fake: %s already exists", github.ErrConflict, p)
 	}
 	if currentSHA != "" && (existing == nil || existing.sha != currentSHA) {
-		return fmt.Errorf("%w: fake: SHA mismatch for %s", ErrConflict, p)
+		return fmt.Errorf("%w: fake: SHA mismatch for %s", github.ErrConflict, p)
 	}
 	cp := make([]byte, len(content))
 	copy(cp, content)
@@ -202,13 +204,13 @@ func (fc *FakeClient) PutFile(_ context.Context, branch, p, _ string, content []
 }
 
 // ListDir returns the direct children of dir on the given branch.
-func (fc *FakeClient) ListDir(_ context.Context, branch, dir string) ([]DirEntry, error) {
+func (fc *FakeClient) ListDir(_ context.Context, branch, dir string) ([]github.DirEntry, error) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	fc.ensureMaps()
 	bf := fc.files[branch]
 	prefix := strings.TrimRight(dir, "/") + "/"
-	var out []DirEntry
+	var out []github.DirEntry
 	for p, e := range bf {
 		if !strings.HasPrefix(p, prefix) {
 			continue
@@ -217,7 +219,7 @@ func (fc *FakeClient) ListDir(_ context.Context, branch, dir string) ([]DirEntry
 		if strings.Contains(rest, "/") {
 			continue // only direct children
 		}
-		out = append(out, DirEntry{Name: path.Base(p), SHA: e.sha})
+		out = append(out, github.DirEntry{Name: path.Base(p), SHA: e.sha})
 	}
 	return out, nil
 }
@@ -236,13 +238,13 @@ func (fc *FakeClient) DefaultBranch(_ context.Context) (string, string, error) {
 }
 
 // GetRepoInfo returns the configured PushDenied/ForkParent as a RepoInfo.
-func (fc *FakeClient) GetRepoInfo(_ context.Context) (RepoInfo, error) {
+func (fc *FakeClient) GetRepoInfo(_ context.Context) (github.RepoInfo, error) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
-	return RepoInfo{CanPush: !fc.PushDenied, ForkParent: fc.ForkParent}, nil
+	return github.RepoInfo{CanPush: !fc.PushDenied, ForkParent: fc.ForkParent}, nil
 }
 
-// GetBranchHead returns the tip SHA of the named branch, or ErrNotFound if it
+// GetBranchHead returns the tip SHA of the named branch, or github.ErrNotFound if it
 // has not been created via CreateBranch/UpdateRef.
 func (fc *FakeClient) GetBranchHead(_ context.Context, name string) (string, error) {
 	fc.mu.Lock()
@@ -250,7 +252,7 @@ func (fc *FakeClient) GetBranchHead(_ context.Context, name string) (string, err
 	fc.ensureMaps()
 	sha, ok := fc.branches[name]
 	if !ok {
-		return "", ErrNotFound
+		return "", github.ErrNotFound
 	}
 	return sha, nil
 }

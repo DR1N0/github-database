@@ -1,13 +1,16 @@
-package github
+package github_test
 
 import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/DR1N0/github-database/ghdb/github"
+	"github.com/DR1N0/github-database/ghdb/internal/githubtest"
 )
 
 func TestFakeRoundTrip(t *testing.T) {
-	fc := &FakeClient{}
+	fc := &githubtest.FakeClient{}
 	ctx := context.Background()
 
 	// BranchExists returns false before creation
@@ -71,7 +74,7 @@ func TestFakeRoundTrip(t *testing.T) {
 
 	// GetBranchHead for a branch that was never created
 	_, err = fc.GetBranchHead(ctx, "does-not-exist")
-	if !errors.Is(err, ErrNotFound) {
+	if !errors.Is(err, github.ErrNotFound) {
 		t.Fatalf("GetBranchHead(does-not-exist): err=%v, want ErrNotFound", err)
 	}
 

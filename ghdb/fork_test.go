@@ -10,6 +10,7 @@ import (
 
 	"github.com/DR1N0/github-database/ghdb"
 	"github.com/DR1N0/github-database/ghdb/github"
+	"github.com/DR1N0/github-database/ghdb/internal/githubtest"
 )
 
 // recordingClient wraps a github.Interface and records which methods were
@@ -91,11 +92,11 @@ func forkBaseline(t *testing.T) fstest.MapFS {
 
 func TestCheckpointCrossRepoForkFlow(t *testing.T) {
 	ctx := context.Background()
-	baseFC := &github.FakeClient{}
+	baseFC := &githubtest.FakeClient{}
 	if err := baseFC.CreateBranch(ctx, "main", "base-main-sha"); err != nil {
 		t.Fatal(err)
 	}
-	forkFC := &github.FakeClient{ForkParent: "upstream/repo"}
+	forkFC := &githubtest.FakeClient{ForkParent: "upstream/repo"}
 	baseRec := &recordingClient{Interface: baseFC}
 	forkRec := &recordingClient{Interface: forkFC}
 
@@ -154,11 +155,11 @@ func TestCheckpointCrossRepoForkFlow(t *testing.T) {
 
 func TestStartOnlineDeltaBranchBootstrapUsesForkRepo(t *testing.T) {
 	ctx := context.Background()
-	baseFC := &github.FakeClient{}
+	baseFC := &githubtest.FakeClient{}
 	if err := baseFC.CreateBranch(ctx, "main", "base-main-sha"); err != nil {
 		t.Fatal(err)
 	}
-	forkFC := &github.FakeClient{ForkParent: "upstream/repo"}
+	forkFC := &githubtest.FakeClient{ForkParent: "upstream/repo"}
 
 	db, err := ghdb.OpenWithClients(forkBaseline(t), baseFC, forkFC)
 	if err != nil {
@@ -176,11 +177,11 @@ func TestStartOnlineDeltaBranchBootstrapUsesForkRepo(t *testing.T) {
 
 func TestStartOnlineFailsWhenForkNotWritable(t *testing.T) {
 	ctx := context.Background()
-	baseFC := &github.FakeClient{}
+	baseFC := &githubtest.FakeClient{}
 	if err := baseFC.CreateBranch(ctx, "main", "base-main-sha"); err != nil {
 		t.Fatal(err)
 	}
-	forkFC := &github.FakeClient{ForkParent: "upstream/repo", PushDenied: true}
+	forkFC := &githubtest.FakeClient{ForkParent: "upstream/repo", PushDenied: true}
 
 	_, err := ghdb.OpenWithClients(forkBaseline(t), baseFC, forkFC)
 	if err == nil {
@@ -193,11 +194,11 @@ func TestStartOnlineFailsWhenForkNotWritable(t *testing.T) {
 
 func TestStartOnlineFailsWhenForkRepoNotActualFork(t *testing.T) {
 	ctx := context.Background()
-	baseFC := &github.FakeClient{}
+	baseFC := &githubtest.FakeClient{}
 	if err := baseFC.CreateBranch(ctx, "main", "base-main-sha"); err != nil {
 		t.Fatal(err)
 	}
-	forkFC := &github.FakeClient{} // ForkParent unset: not a fork of anything
+	forkFC := &githubtest.FakeClient{} // ForkParent unset: not a fork of anything
 
 	_, err := ghdb.OpenWithClients(forkBaseline(t), baseFC, forkFC)
 	if err == nil {

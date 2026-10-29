@@ -6,13 +6,13 @@ import (
 	"testing"
 
 	"github.com/DR1N0/github-database/ghdb"
-	"github.com/DR1N0/github-database/ghdb/github"
+	"github.com/DR1N0/github-database/ghdb/internal/githubtest"
 )
 
 // failingTreeClient fails CreateTree a fixed number of times, emulating a
 // transient GitHub error in the middle of a checkpoint.
 type failingTreeClient struct {
-	*github.FakeClient
+	*githubtest.FakeClient
 	failures int
 }
 
@@ -29,7 +29,7 @@ func (c *failingTreeClient) CreateTree(ctx context.Context, baseTreeSHA string, 
 // further checkpoints until the process restarted. The retry also exercises
 // reuse of the snapshot branch that the failed attempt already created.
 func TestCheckpointCanBeRetriedAfterFailure(t *testing.T) {
-	client := &failingTreeClient{FakeClient: &github.FakeClient{}, failures: 1}
+	client := &failingTreeClient{FakeClient: &githubtest.FakeClient{}, failures: 1}
 	db, err := ghdb.OpenWithClient(onlineBaseline(t), client)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -54,7 +54,7 @@ func TestCheckpointCanBeRetriedAfterFailure(t *testing.T) {
 // TestCheckpointRetryDoesNotDuplicateState verifies the retry produces exactly
 // one checkpoint commit and that the data is intact afterwards.
 func TestCheckpointRetryDoesNotDuplicateState(t *testing.T) {
-	client := &failingTreeClient{FakeClient: &github.FakeClient{}, failures: 1}
+	client := &failingTreeClient{FakeClient: &githubtest.FakeClient{}, failures: 1}
 	db, err := ghdb.OpenWithClient(onlineBaseline(t), client)
 	if err != nil {
 		t.Fatalf("open: %v", err)
