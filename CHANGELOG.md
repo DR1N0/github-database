@@ -6,6 +6,23 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Checkpoint leases make a checkpoint a single-writer operation across
+  instances. The lease file `<data_repo_path>/_checkpoint/v<N>.lease` is claimed
+  with GitHub's file-SHA compare-and-swap, so the winner is decided by GitHub
+  rather than by local timing. `Option.CheckpointLease` tunes the window
+  (default 5 minutes); `ErrCheckpointBusy` and `ErrCheckpointTaken` report
+  contention; a failed checkpoint stays retryable by the instance that owns it.
+- `github.ErrConflict`, matched by `errors.Is` for a lost compare-and-swap
+  (HTTP 409, or 422 for a create over an existing file).
+
+### Fixed
+
+- Two instances checkpointing the same version at once could overwrite each
+  other's snapshot branch; the losing instance's writes could then be filtered
+  out by the new baseline time and be lost.
+
 ## [0.0.10] - 2026-10-29
 
 ### Changed

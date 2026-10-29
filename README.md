@@ -146,6 +146,16 @@ Checkpoint commits a full snapshot of current state to the repository in a singl
 
 A checkpoint may succeed once per instance: after it completes, further calls return an error and the instance keeps writing to the new version until it is restarted. A checkpoint that fails — network error, rate limit, cancelled context — can be retried on the same instance; a snapshot branch left behind by the failed attempt is reused. The new version becomes the baseline only after the pull request is merged and the embedded `db_meta.json` is rebuilt, so merge the PR before redeploying.
 
+### Multiple instances
+
+Several instances may serve the same database. A checkpoint is a single-writer operation across processes: the right to checkpoint version `v<N>` is claimed through the lease file `<data_repo_path>/_checkpoint/v<N>.lease`, written with GitHub's file-SHA compare-and-swap. GitHub decides the winner, not local timing.
+
+- An instance that finds a live lease held by someone else gets `ghdb.ErrCheckpointBusy`.
+- An instance that finds the lease marked done gets `ghdb.ErrCheckpointTaken`, and it moves its writes to the next version so they are not lost.
+- A failed checkpoint keeps the lease, so the same instance can retry immediately; another instance may take over only after the lease expires (5 minutes by default, set with `Option.CheckpointLease`).
+
+Instances are not expected to agree on a version at any instant: a rolling update is the normal way to move a cluster forward. Instances pick up a new version from the delta branch within `sync_interval_sec` and start writing to it; the checkpoint lease only guarantees that a version is snapshotted once.
+
 ### Graph mode
 
 Set `"mode": "graph"` and declare vertices and edges. Vertices live in `vertices/<label>.json`, edges in `edges/<label>.json`.
