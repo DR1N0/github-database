@@ -154,6 +154,8 @@ Several instances may serve the same database. A checkpoint is a single-writer o
 - An instance that finds the lease marked done gets `ghdb.ErrCheckpointTaken`, and it moves its writes to the next version so they are not lost.
 - A failed checkpoint keeps the lease, so the same instance can retry immediately; another instance may take over only after the lease expires (5 minutes by default, set with `Option.CheckpointLease`).
 
+The lease is not renewed while a checkpoint runs, so a checkpoint on a large database that can take longer than the window should raise `Option.CheckpointLease` above the expected duration.
+
 Instances are not expected to agree on a version at any instant: a rolling update is the normal way to move a cluster forward. Instances pick up a new version from the delta branch within `sync_interval_sec` and start writing to it; the checkpoint lease only guarantees that a version is snapshotted once.
 
 ### Graph mode
