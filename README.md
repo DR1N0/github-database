@@ -248,6 +248,21 @@ The example runs an HTTP server on `:8080` with endpoints:
 go build ./...
 go vet ./...
 go test -race -coverpkg=./... ./...
+go test -run '^$' -bench=. -benchmem ./ghdb/base/
 ```
 
-CI runs these commands on Linux with the race detector enabled.
+CI runs these checks on Linux and Windows across the oldest and latest supported Go versions; the race detector runs on Linux.
+
+## Performance
+
+Measured on a Ryzen 7 9700X with Go 1.27 (`go test -bench=. -benchmem ./ghdb/base/`):
+
+| Benchmark | Time per op | Notes |
+| --- | --- | --- |
+| `MarshalJSONL` (1,000 records) | ~0.55 ms | ~0.9 MB allocated |
+| `DecodeJSONL` (1,000 records) | ~0.57 ms | ~258 MB/s |
+| `SplitMutationRecords` (1,000 records) | ~0.61 ms | default segment caps |
+| `JSONMerge` | ~1.2 µs | one field |
+| `Flush` (500 records) | ~0.92 ms | in-memory client |
+
+These bound the CPU side only: in a real deployment a flush waits on GitHub, not on JSON encoding.
