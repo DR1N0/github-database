@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/DR1N0/github-database/ghdb/github"
 )
@@ -61,4 +62,7 @@ type Engine interface {
 	SetCommitterIdentity(name, email string)
 	// SetCommitSigner sets the optional signing callback for checkpoint commits.
 	SetCommitSigner(fn func([]byte) (string, error))
+	// SetCheckpointLease overrides how long an unfinished checkpoint blocks
+	// another instance before its lease may be taken over.
+	SetCheckpointLease(d time.Duration)
 }

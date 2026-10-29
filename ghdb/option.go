@@ -28,6 +28,7 @@ type Option struct {
 	commitSigner         func([]byte) (string, error)
 	startupProgress      base.StartupProgressFunc
 	githubRequestTimeout time.Duration
+	checkpointLease      time.Duration
 }
 
 // NewOption creates an Option rooted at baseline (an fs.FS holding db_meta.json and data files).
@@ -92,6 +93,15 @@ func (o *Option) StartupProgress(fn StartupProgressFunc) *Option {
 // Non-positive values use the default timeout.
 func (o *Option) GitHubRequestTimeout(timeout time.Duration) *Option {
 	o.githubRequestTimeout = timeout
+	return o
+}
+
+// CheckpointLease sets how long an unfinished checkpoint blocks another
+// instance before its lease can be taken over. Non-positive values use the
+// default (5 minutes). A checkpoint that fails is immediately retryable by the
+// same instance, because it still owns the lease.
+func (o *Option) CheckpointLease(d time.Duration) *Option {
+	o.checkpointLease = d
 	return o
 }
 
@@ -162,6 +172,7 @@ func (o *Option) Open(ctx context.Context) (DB, error) {
 		eng.SetCommitterIdentity(o.committerName, o.committerEmail)
 	}
 	eng.SetCommitSigner(o.commitSigner)
+	eng.SetCheckpointLease(o.checkpointLease)
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -284,6 +295,8 @@ var ErrUnknownTable = table.ErrUnknownTable
 var ErrVertexIDMismatch = graph.ErrVertexIDMismatch
 var ErrUnknownVertex = graph.ErrUnknownVertex
 var ErrOffline = base.ErrOffline
+var ErrCheckpointBusy = base.ErrCheckpointBusy
+var ErrCheckpointTaken = base.ErrCheckpointTaken
 
 type ErrMutationTooLarge = base.ErrMutationTooLarge
 

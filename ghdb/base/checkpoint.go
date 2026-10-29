@@ -3,10 +3,12 @@ package base
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
+
+	"github.com/DR1N0/github-database/ghdb/github"
 )
 
 // buildCommitObject constructs the raw git commit object bytes that a signing
@@ -23,6 +25,127 @@ func buildCommitObject(treeSHA, parentSHA, name, email string, ts time.Time, mes
 	))
 }
 
+// ErrCheckpointBusy is returned when another instance holds an unexpired
+// checkpoint lease for the current version. The call can be retried once that
+// lease expires (see Option.CheckpointLease).
+var ErrCheckpointBusy = errors.New("ghdb: another instance is checkpointing this version")
+
+// ErrCheckpointTaken is returned when another instance already checkpointed the
+// current version. The instance switches its writes to the next version and
+// keeps serving; merging the snapshot's pull request is what makes it the new
+// baseline.
+var ErrCheckpointTaken = errors.New("ghdb: this version was already checkpointed")
+
+// defaultCheckpointLease bounds how long a checkpoint may stay unfinished
+// before another instance is allowed to take it over.
+const defaultCheckpointLease = 5 * time.Minute
+
+// checkpointLease is the compare-and-swap record that makes a checkpoint a
+// single-writer operation across instances. It lives beside the version
+// directories, so replay and poll never list it as a segment.
+type checkpointLease struct {
+	Owner      string    `json:"owner"`
+	AcquiredAt time.Time `json:"acquired_at"`
+	Done       bool      `json:"done,omitempty"`
+	Snapshot   string    `json:"snapshot,omitempty"`
+}
+
+func checkpointLeasePath(cfg Config, version int) string {
+	return fmt.Sprintf("%s/_checkpoint/v%d.lease", GetDataRepoPath(cfg), version)
+}
+
+func (b *baseDB) checkpointLeaseDuration() time.Duration {
+	if b.checkpointLease > 0 {
+		return b.checkpointLease
+	}
+	return defaultCheckpointLease
+}
+
+// acquireCheckpointLease claims the right to checkpoint nextVer. GitHub decides
+// the winner, not local timing: a create without a SHA loses to an existing
+// file, and a write carrying a stale SHA loses to a concurrent writer. The same
+// instance may renew its own lease, which makes a failed checkpoint retryable.
+func (b *baseDB) acquireCheckpointLease(ctx context.Context, nextVer int) (string, error) {
+	path := checkpointLeasePath(b.cfg, nextVer)
+	lease := checkpointLease{Owner: b.instanceID, AcquiredAt: time.Now().UTC()}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		raw, sha, err := b.forkGH.GetFile(ctx, b.cfg.DeltaBranch, path)
+		if err != nil {
+			if !errors.Is(err, github.ErrNotFound) {
+				return "", err
+			}
+			if err := b.putCheckpointLease(ctx, path, lease, ""); err != nil {
+				if isLeaseConflict(err) {
+					continue
+				}
+				return "", err
+			}
+			return path, nil
+		}
+
+		var current checkpointLease
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return "", fmt.Errorf("ghdb: checkpoint: parse lease %s: %w", path, err)
+		}
+		switch {
+		case current.Done:
+			return "", fmt.Errorf("%w: %s completed v%d", ErrCheckpointTaken, current.Owner, nextVer)
+		case current.Owner != b.instanceID && time.Since(current.AcquiredAt) < b.checkpointLeaseDuration():
+			return "", fmt.Errorf("%w: %s holds the lease for v%d", ErrCheckpointBusy, current.Owner, nextVer)
+		}
+		// Our own unfinished lease (a retry) or an expired one: take it over.
+		if err := b.putCheckpointLease(ctx, path, lease, sha); err != nil {
+			if isLeaseConflict(err) {
+				continue
+			}
+			return "", err
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("%w: could not acquire the checkpoint lease for v%d", ErrCheckpointBusy, nextVer)
+}
+
+func (b *baseDB) putCheckpointLease(ctx context.Context, path string, lease checkpointLease, sha string) error {
+	data, err := json.Marshal(lease)
+	if err != nil {
+		return err
+	}
+	message := fmt.Sprintf("ghdb: checkpoint lease %s", b.instanceID)
+	return b.forkGH.PutFile(ctx, b.cfg.DeltaBranch, path, message, data, sha)
+}
+
+// markCheckpointLeaseDone records that nextVer has a completed snapshot. A
+// failure here is not fatal: the lease expires on its own, and the snapshot
+// pull request is what actually carries the new baseline.
+func (b *baseDB) markCheckpointLeaseDone(ctx context.Context, path, snapshot string) {
+	raw, sha, err := b.forkGH.GetFile(ctx, b.cfg.DeltaBranch, path)
+	if err != nil {
+		b.Logger().Printf("ghdb: checkpoint: could not read lease %s: %v", path, err)
+		return
+	}
+	var lease checkpointLease
+	if err := json.Unmarshal(raw, &lease); err != nil {
+		b.Logger().Printf("ghdb: checkpoint: could not parse lease %s: %v", path, err)
+		return
+	}
+	lease.Done = true
+	lease.Snapshot = snapshot
+	if err := b.putCheckpointLease(ctx, path, lease, sha); err != nil {
+		b.Logger().Printf("ghdb: checkpoint: could not mark lease %s done: %v", path, err)
+	}
+}
+
+// isLeaseConflict reports whether err means another writer changed the lease
+// between our read and our write. GitHub answers 409 for a stale SHA and 422
+// when a create omits the SHA of an existing file.
+func isLeaseConflict(err error) bool {
+	if errors.Is(err, github.ErrConflict) {
+		return true
+	}
+	return strings.Contains(err.Error(), "HTTP 422")
+}
+
 func (b *baseDB) Checkpoint(ctx context.Context) error {
 	b.ckptMu.Lock()
 	defer b.ckptMu.Unlock()
@@ -34,6 +157,20 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	// hasCheckpointed is only set once every step has succeeded, so a failed
 	// checkpoint (network error, bad credentials, cancelled context) can be
 	// retried on the same instance instead of requiring a restart.
+
+	nextVer := b.cfg.Version + 1
+	leasePath, err := b.acquireCheckpointLease(ctx, nextVer)
+	if err != nil {
+		if errors.Is(err, ErrCheckpointTaken) {
+			// Another instance produced the snapshot. Stop writing to this
+			// version so this instance's writes land on the next one.
+			b.mu.Lock()
+			b.nextVerExists = true
+			b.writeVer = nextVer
+			b.mu.Unlock()
+		}
+		return err
+	}
 
 	if err := b.flush(ctx); err != nil {
 		return fmt.Errorf("ghdb: checkpoint flush: %w", err)
@@ -47,7 +184,6 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	}
 
 	checkpointedAt := time.Now().UTC()
-	nextVer := b.cfg.Version + 1
 
 	sourceBranch, mainSHA, err := resolveSourceBranch(ctx, b.baseGH, b.cfg)
 	if err != nil {
@@ -65,8 +201,8 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	}
 
 	snapshotBranch := fmt.Sprintf("ghdb-ckpt-%s-v%d", b.cfg.Name, nextVer)
-	// A previous failed attempt may have left the snapshot branch behind. Reuse
-	// it instead of failing: UpdateRef below force-moves it to the new commit.
+	// Our own failed attempt may have left the snapshot branch behind; the lease
+	// makes reuse safe. UpdateRef below force-moves it to the new commit.
 	if err := b.forkGH.CreateBranch(ctx, snapshotBranch, mainSHA); err != nil {
 		exists, existsErr := b.forkGH.BranchExists(ctx, snapshotBranch)
 		if existsErr != nil || !exists {
@@ -128,8 +264,10 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 
 	title := fmt.Sprintf("ghdb: checkpoint %s to v%d", b.cfg.Name, nextVer)
 	if _, err := b.baseGH.CreatePR(ctx, title, head, targetBranch); err != nil {
-		log.Printf("ghdb: checkpoint PR: %v", err)
+		b.Logger().Printf("ghdb: checkpoint PR: %v", err)
 	}
+
+	b.markCheckpointLeaseDone(ctx, leasePath, commitSHA)
 
 	b.mu.Lock()
 	b.nextVerExists = true

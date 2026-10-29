@@ -229,6 +229,9 @@ type baseDB struct {
 	committerEmail string
 	// Optional signing callback. Set via SetCommitSigner before StartOnline.
 	commitSigner func([]byte) (string, error)
+	// checkpointLease overrides how long an unfinished checkpoint blocks another
+	// instance. Set via SetCheckpointLease before Checkpoint.
+	checkpointLease time.Duration
 
 	stopCh    chan struct{}
 	flushDone chan struct{}
@@ -308,6 +311,10 @@ func (b *baseDB) SetCommitterIdentity(name, email string) {
 
 func (b *baseDB) SetCommitSigner(fn func([]byte) (string, error)) {
 	b.commitSigner = fn
+}
+
+func (b *baseDB) SetCheckpointLease(d time.Duration) {
+	b.checkpointLease = d
 }
 
 // maxRateLimitBackoff bounds how long a reported quota reset can pause the
