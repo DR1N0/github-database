@@ -9,12 +9,22 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("ghdb: not found")
+
+// ErrRateLimited is returned when GitHub rejects a request because the token's
+// rate limit is exhausted. Callers may treat it as retryable later, not as a
+// permanent failure.
+var ErrRateLimited = errors.New("ghdb: GitHub API rate limit exceeded")
+
+// userAgent identifies this client. GitHub rejects requests without a
+// User-Agent, and a stable value makes the library's traffic attributable.
+const userAgent = "github-database-ghdb/1 (+https://github.com/DR1N0/github-database)"
 
 // DefaultRequestTimeout is the timeout used for each GitHub HTTP request.
 const DefaultRequestTimeout = 30 * time.Second
@@ -67,17 +77,68 @@ func resolveRequestTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
+// escapePath escapes each segment of a repo-relative path for use in a URL path.
+// Paths are repository file paths, so a literal "/" must stay a separator while
+// any other reserved character (space, "#", "?") is escaped.
+func escapePath(p string) string {
+	segments := strings.Split(p, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
+}
+
+// refQuery returns the ?ref= query for a branch name. Branch names may contain
+// "/", which would otherwise be read as part of the path.
+func refQuery(branch string) string {
+	return "?ref=" + url.QueryEscape(branch)
+}
+
+// readErrorBody returns a bounded snippet of an error response body so failures
+// carry GitHub's explanation rather than only a status code.
+func readErrorBody(resp *http.Response) string {
+	if resp.Body == nil {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if err != nil {
+		return ""
+	}
+	snippet := strings.TrimSpace(string(body))
+	if snippet == "" {
+		return ""
+	}
+	return ": " + snippet
+}
+
+// httpError builds the error for an unexpected response. An exhausted quota is
+// reported as ErrRateLimited so callers can tell "retry later" from "this will
+// never work".
+func (c *httpClient) httpError(op, detail string, resp *http.Response) error {
+	target := op
+	if detail != "" {
+		target = op + " " + detail
+	}
+	rateLimited := resp.StatusCode == http.StatusTooManyRequests ||
+		(resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0")
+	if rateLimited {
+		return fmt.Errorf("ghdb: %s: %w (resets at %s)", target, ErrRateLimited, resp.Header.Get("X-RateLimit-Reset"))
+	}
+	return fmt.Errorf("ghdb: %s: HTTP %d%s", target, resp.StatusCode, readErrorBody(resp))
+}
+
 // apiURL returns the full API URL for a repo path.
 func (c *httpClient) apiURL(suffix string) string {
 	return c.baseURL + "/repos/" + c.repo + suffix
 }
 
-func (c *httpClient) do(ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+func (c *httpClient) do(ctx context.Context, method, endpoint string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -88,8 +149,8 @@ func (c *httpClient) do(ctx context.Context, method, url string, body io.Reader)
 // GetFile fetches a single file's content from a branch.
 // Returns ErrNotFound if the file or branch does not exist (HTTP 404).
 func (c *httpClient) GetFile(ctx context.Context, branch, path string) ([]byte, string, error) {
-	url := c.apiURL("/contents/" + path + "?ref=" + branch)
-	resp, err := c.do(ctx, http.MethodGet, url, nil)
+	endpoint := c.apiURL("/contents/" + escapePath(path) + refQuery(branch))
+	resp, err := c.do(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -98,7 +159,7 @@ func (c *httpClient) GetFile(ctx context.Context, branch, path string) ([]byte, 
 		return nil, "", ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("ghdb: GetFile %s: HTTP %d", path, resp.StatusCode)
+		return nil, "", c.httpError("GetFile", path, resp)
 	}
 	var payload struct {
 		Content  string `json:"content"`
@@ -161,44 +222,104 @@ func (c *httpClient) PutFile(ctx context.Context, branch, path, message string, 
 		body["sha"] = currentSHA
 	}
 	b, _ := json.Marshal(body)
-	resp, err := c.do(ctx, http.MethodPut, c.apiURL("/contents/"+path), bytes.NewReader(b))
+	resp, err := c.do(ctx, http.MethodPut, c.apiURL("/contents/"+escapePath(path)), bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("ghdb: PutFile %s: HTTP %d", path, resp.StatusCode)
+		return c.httpError("PutFile", path, resp)
 	}
 	return nil
 }
 
-// ListDir lists direct children of a directory path on a branch.
-// Returns an empty slice (no error) if the path does not exist.
-func (c *httpClient) ListDir(ctx context.Context, branch, path string) ([]DirEntry, error) {
-	url := c.apiURL("/contents/" + path + "?ref=" + branch)
-	resp, err := c.do(ctx, http.MethodGet, url, nil)
+// treeEntry is one entry in a git tree listing.
+type treeEntry struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+	Size int64  `json:"size"`
+}
+
+// listTree lists the direct children of one git tree. treeRef is a tree SHA or
+// a ref such as a branch name, which GitHub resolves before listing.
+// A truncated listing is reported as an error: silently dropping entries would
+// hide delta segments from replay.
+func (c *httpClient) listTree(ctx context.Context, treeRef string) ([]treeEntry, error) {
+	resp, err := c.do(ctx, http.MethodGet, c.apiURL("/git/trees/"+url.PathEscape(treeRef)), nil)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil
+		return nil, ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ghdb: ListDir %s: HTTP %d", path, resp.StatusCode)
+		return nil, c.httpError("ListTree", treeRef, resp)
 	}
-	var items []struct {
-		Name string `json:"name"`
-		SHA  string `json:"sha"`
-		Type string `json:"type"`
+	var payload struct {
+		Tree      []treeEntry `json:"tree"`
+		Truncated bool        `json:"truncated"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, err
 	}
-	var out []DirEntry
-	for _, it := range items {
-		if it.Type == "file" {
-			out = append(out, DirEntry{Name: it.Name, SHA: it.SHA})
+	if payload.Truncated {
+		return nil, fmt.Errorf("ghdb: tree %q is truncated by GitHub; the directory has too many entries to list completely", treeRef)
+	}
+	return payload.Tree, nil
+}
+
+// pathSegments splits a repository path into its components.
+func pathSegments(p string) []string {
+	trimmed := strings.Trim(p, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
+}
+
+// ListDir lists the direct child files of a directory path on a branch.
+// Returns an empty slice (no error) if the branch or path does not exist.
+//
+// Listings walk git trees instead of the contents API. The contents endpoint
+// stops at 1,000 entries per directory, which a long-lived delta branch
+// eventually exceeds; trees have a far higher ceiling, and every level of the
+// walk is an immutable object so the listing is self-consistent.
+func (c *httpClient) ListDir(ctx context.Context, branch, path string) ([]DirEntry, error) {
+	ref := branch
+	for _, segment := range pathSegments(path) {
+		entries, err := c.listTree(ctx, ref)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		next := ""
+		for _, entry := range entries {
+			if entry.Type == "tree" && entry.Path == segment {
+				next = entry.SHA
+				break
+			}
+		}
+		if next == "" {
+			return nil, nil
+		}
+		ref = next
+	}
+	entries, err := c.listTree(ctx, ref)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Type == "blob" {
+			out = append(out, DirEntry{Name: entry.Path, SHA: entry.SHA})
 		}
 	}
 	return out, nil
@@ -215,7 +336,7 @@ func (c *httpClient) BranchExists(ctx context.Context, name string) (bool, error
 		return false, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("ghdb: BranchExists %s: HTTP %d", name, resp.StatusCode)
+		return false, c.httpError("BranchExists", name, resp)
 	}
 	return true, nil
 }
@@ -229,7 +350,7 @@ func (c *httpClient) CreateBranch(ctx context.Context, name, fromSHA string) err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("ghdb: CreateBranch %s: HTTP %d", name, resp.StatusCode)
+		return c.httpError("CreateBranch", name, resp)
 	}
 	return nil
 }
@@ -242,7 +363,7 @@ func (c *httpClient) DefaultBranch(ctx context.Context) (string, string, error) 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("ghdb: DefaultBranch: HTTP %d", resp.StatusCode)
+		return "", "", c.httpError("DefaultBranch", c.repo, resp)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	var repoInfo struct {
@@ -274,7 +395,7 @@ func (c *httpClient) GetBranchHead(ctx context.Context, branch string) (string, 
 		return "", ErrNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ghdb: GetBranchHead %q: HTTP %d", branch, resp.StatusCode)
+		return "", c.httpError("GetBranchHead", branch, resp)
 	}
 	var branchInfo struct {
 		Commit struct {
@@ -296,7 +417,7 @@ func (c *httpClient) GetRepoInfo(ctx context.Context) (RepoInfo, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return RepoInfo{}, fmt.Errorf("ghdb: GetRepoInfo: HTTP %d", resp.StatusCode)
+		return RepoInfo{}, c.httpError("GetRepoInfo", c.repo, resp)
 	}
 	var repoInfo struct {
 		Fork        bool `json:"fork"`
@@ -326,7 +447,7 @@ func (c *httpClient) CreatePR(ctx context.Context, title, head, base string) (st
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("ghdb: CreatePR: HTTP %d", resp.StatusCode)
+		return "", c.httpError("CreatePR", "", resp)
 	}
 	var pr struct {
 		HTMLURL string `json:"html_url"`
@@ -346,7 +467,7 @@ func (c *httpClient) GetAuthenticatedUser(ctx context.Context) (string, string, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("ghdb: GetAuthenticatedUser: HTTP %d", resp.StatusCode)
+		return "", "", c.httpError("GetAuthenticatedUser", "", resp)
 	}
 	var u struct {
 		Login string `json:"login"`
@@ -376,7 +497,7 @@ func (c *httpClient) GetCommitTree(ctx context.Context, commitSHA string) (strin
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ghdb: GetCommitTree %s: HTTP %d", commitSHA, resp.StatusCode)
+		return "", c.httpError("GetCommitTree", commitSHA, resp)
 	}
 	var commit struct {
 		Tree struct {
@@ -409,7 +530,7 @@ func (c *httpClient) CreateTree(ctx context.Context, baseTreeSHA string, files m
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("ghdb: CreateTree: HTTP %d", resp.StatusCode)
+		return "", c.httpError("CreateTree", "", resp)
 	}
 	var result struct {
 		SHA string `json:"sha"`
@@ -447,7 +568,7 @@ func (c *httpClient) CreateCommit(ctx context.Context, treeSHA, parentSHA, messa
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		return "", fmt.Errorf("ghdb: CreateCommit: HTTP %d", resp.StatusCode)
+		return "", c.httpError("CreateCommit", "", resp)
 	}
 	var result struct {
 		SHA string `json:"sha"`
@@ -467,7 +588,7 @@ func (c *httpClient) UpdateRef(ctx context.Context, branch, commitSHA string) er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ghdb: UpdateRef %s: HTTP %d", branch, resp.StatusCode)
+		return c.httpError("UpdateRef", branch, resp)
 	}
 	return nil
 }
