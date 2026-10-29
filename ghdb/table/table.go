@@ -13,6 +13,10 @@ import (
 var ErrKeyMismatch = errors.New("ghdb: key mismatch")
 var ErrRequiredMissing = errors.New("ghdb: required column missing")
 
+// ErrUnknownTable is returned by TableDB.Table when the requested name is not
+// declared in db_meta.json.
+var ErrUnknownTable = errors.New("ghdb: unknown table")
+
 // tableDB is the concrete implementation of TableStore (unexported).
 type tableDB struct {
 	eng    base.Engine
@@ -73,7 +77,15 @@ func GetInternal(s TableDB) base.Engine {
 func (db *tableDB) Mode() string             { return "table" }
 func (db *tableDB) IsOnline() bool           { return db.eng.IsOnline() }
 func (db *tableDB) Schema() []base.TableSpec { return db.eng.GetConfig().Tables }
-func (db *tableDB) Table(name string) Table  { return db.tables[name] }
+
+// Table returns the named table, or ErrUnknownTable.
+func (db *tableDB) Table(name string) (Table, error) {
+	tbl, ok := db.tables[name]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownTable, name)
+	}
+	return tbl, nil
+}
 
 func (db *tableDB) Checkpoint(ctx context.Context) error {
 	if !db.eng.IsOnline() {

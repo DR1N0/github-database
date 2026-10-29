@@ -24,10 +24,10 @@ type EdgeResult struct {
 type GraphDB interface {
 	base.DB
 	Schema() GraphSchema
-	// Vertex returns the labelled vertex set, or nil when the label is not
-	// declared in the schema. Compare the result against nil before calling
-	// methods on it.
-	Vertex(label string) VertexSet
+	// Vertex returns the labelled vertex set. It returns ErrUnknownVertex when
+	// the label is not declared in db_meta.json, so callers never hold a nil
+	// VertexSet.
+	Vertex(label string) (VertexSet, error)
 	AddEdge(label, from, to string) error
 	RemoveEdge(label, from, to string) error
 	OutNeighbors(label, id string) []string

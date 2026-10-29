@@ -15,7 +15,7 @@ import (
 // key available when the snapshot is read back.
 func TestVertexWritesRequireMatchingID(t *testing.T) {
 	db := makeGraphDB(t)
-	vs := db.Vertex("component")
+	vs := mustVertex(t, db, "component")
 
 	for _, tc := range []struct {
 		name  string
@@ -50,7 +50,7 @@ func TestVertexWritesRequireMatchingID(t *testing.T) {
 // where a checkpointed graph could not be opened again.
 func TestCheckpointSnapshotReloadsVertices(t *testing.T) {
 	db := makeGraphDB(t)
-	if err := db.Vertex("component").Set("svc-c", json.RawMessage(`{"id":"svc-c","name":"svc-c"}`)); err != nil {
+	if err := mustVertex(t, db, "component").Set("svc-c", json.RawMessage(`{"id":"svc-c","name":"svc-c"}`)); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 
@@ -83,7 +83,7 @@ func TestCheckpointSnapshotReloadsVertices(t *testing.T) {
 // and edge properties.
 func TestGraphValuesAreIndependentCopies(t *testing.T) {
 	db := makeGraphDB(t)
-	vs := db.Vertex("component")
+	vs := mustVertex(t, db, "component")
 
 	src := json.RawMessage(`{"id":"svc-c","name":"svc-c"}`)
 	if err := vs.Set("svc-c", src); err != nil {
@@ -142,7 +142,7 @@ func TestApplyRejectsRemotelyCorruptedVertex(t *testing.T) {
 	if !errors.Is(err, ErrVertexIDMismatch) {
 		t.Fatalf("apply error = %v, want ErrVertexIDMismatch", err)
 	}
-	if _, ok := db.Vertex("component").Get("svc-z"); ok {
+	if _, ok := mustVertex(t, db, "component").Get("svc-z"); ok {
 		t.Fatal("corrupted remote vertex was applied")
 	}
 }

@@ -9,9 +9,9 @@ import (
 type TableDB interface {
 	base.DB // Mode, IsOnline, Checkpoint, Close
 	Schema() []base.TableSpec
-	// Table returns the named table, or nil when it is not declared in the
-	// schema. Compare the result against nil before calling methods on it.
-	Table(name string) Table
+	// Table returns the named table. It returns ErrUnknownTable when the name is
+	// not declared in db_meta.json, so callers never hold a nil Table.
+	Table(name string) (Table, error)
 }
 
 type Table interface {

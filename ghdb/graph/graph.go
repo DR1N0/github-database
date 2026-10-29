@@ -43,6 +43,10 @@ func validateJSONObject(value json.RawMessage, what string) error {
 // the checkpoint unloadable.
 var ErrVertexIDMismatch = errors.New("ghdb: vertex id mismatch")
 
+// ErrUnknownVertex is returned by GraphDB.Vertex when the requested label is
+// not declared in db_meta.json.
+var ErrUnknownVertex = errors.New("ghdb: unknown vertex label")
+
 // vertexObject decodes a vertex value into a JSON object, rejecting anything else.
 func vertexObject(value json.RawMessage) (map[string]json.RawMessage, error) {
 	var obj map[string]json.RawMessage
@@ -191,7 +195,14 @@ func (db *graphDB) Schema() GraphSchema {
 	cfg := db.eng.GetConfig()
 	return GraphSchema{Vertices: cfg.Vertices, Edges: cfg.Edges}
 }
-func (db *graphDB) Vertex(label string) VertexSet { return db.vertices[label] }
+// Vertex returns the labelled vertex set, or ErrUnknownVertex.
+func (db *graphDB) Vertex(label string) (VertexSet, error) {
+	vs, ok := db.vertices[label]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownVertex, label)
+	}
+	return vs, nil
+}
 
 func (db *graphDB) Checkpoint(ctx context.Context) error {
 	if !db.eng.IsOnline() {

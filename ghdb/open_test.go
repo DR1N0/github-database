@@ -33,7 +33,7 @@ func TestOpenOfflineTable(t *testing.T) {
 	if db.IsOnline() {
 		t.Error("expected offline")
 	}
-	v, ok := db.(TableDB).Table("things").Get("a")
+	v, ok := mustTableOf(t, db.(TableDB), "things").Get("a")
 	if !ok || string(v) != `{"id":"a"}` {
 		t.Errorf("Get: got %q ok=%v", v, ok)
 	}

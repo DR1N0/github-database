@@ -280,7 +280,9 @@ type Table = table.Table
 
 var ErrKeyMismatch = table.ErrKeyMismatch
 var ErrRequiredMissing = table.ErrRequiredMissing
+var ErrUnknownTable = table.ErrUnknownTable
 var ErrVertexIDMismatch = graph.ErrVertexIDMismatch
+var ErrUnknownVertex = graph.ErrUnknownVertex
 var ErrOffline = base.ErrOffline
 
 type ErrMutationTooLarge = base.ErrMutationTooLarge

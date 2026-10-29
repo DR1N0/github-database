@@ -14,7 +14,11 @@ func handleTable(w http.ResponseWriter, r *http.Request, parts []string) {
 		http.NotFound(w, r)
 		return
 	}
-	tbl := tableDB.Table("user_info")
+	tbl, err := tableDB.Table("user_info")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)

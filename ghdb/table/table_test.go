@@ -15,7 +15,7 @@ func TestOversizedMutationRecordRejectedBeforeTableStateChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = db.Table("components").Set("svc-a", payload)
+	err = mustTable(t, db, "components").Set("svc-a", payload)
 	var tooLarge *base.ErrMutationTooLarge
 	if !errors.As(err, &tooLarge) {
 		t.Fatalf("Set error = %v, want ErrMutationTooLarge", err)
@@ -35,10 +35,10 @@ func TestOversizedTableOperationsLeaveStateAndBufferUnchanged(t *testing.T) {
 			t.Fatalf("error = %v, want ErrMutationTooLarge", err)
 		}
 	}
-	assertTooLarge(t, db.Table("components").Set("svc-a", json.RawMessage(`{"name":"svc-a","payload":"`+big+`"}`)))
-	assertTooLarge(t, db.Table("components").Patch("svc-a", map[string]json.RawMessage{"payload": json.RawMessage(`"` + big + `"`)}))
-	assertTooLarge(t, db.Table("components").Delete(big))
-	value, ok := db.Table("components").Get("svc-a")
+	assertTooLarge(t, mustTable(t, db, "components").Set("svc-a", json.RawMessage(`{"name":"svc-a","payload":"`+big+`"}`)))
+	assertTooLarge(t, mustTable(t, db, "components").Patch("svc-a", map[string]json.RawMessage{"payload": json.RawMessage(`"` + big + `"`)}))
+	assertTooLarge(t, mustTable(t, db, "components").Delete(big))
+	value, ok := mustTable(t, db, "components").Get("svc-a")
 	if !ok || string(value) != `{"name":"svc-a","version":"1.0"}` {
 		t.Fatal("table state changed after rejected mutation")
 	}
@@ -84,7 +84,7 @@ func TestApplyToTableDBRejectsInvalidMutationBeforeStateChange(t *testing.T) {
 
 func TestTableGet(t *testing.T) {
 	db := makeTableDB(t)
-	rec, ok := db.Table("components").Get("svc-a")
+	rec, ok := mustTable(t, db, "components").Get("svc-a")
 	if !ok {
 		t.Fatal("expected svc-a")
 	}
@@ -97,7 +97,7 @@ func TestTableGet(t *testing.T) {
 
 func TestTableSet(t *testing.T) {
 	db := makeTableDB(t)
-	tbl := db.Table("components")
+	tbl := mustTable(t, db, "components")
 	if err := tbl.Set("svc-c", json.RawMessage(`{"name":"svc-c","version":"3.0"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestTableSet(t *testing.T) {
 
 func TestTablePatchMerges(t *testing.T) {
 	db := makeTableDB(t)
-	tbl := db.Table("components")
+	tbl := mustTable(t, db, "components")
 	if err := tbl.Patch("svc-a", map[string]json.RawMessage{"version": json.RawMessage(`"9.0"`)}); err != nil {
 		t.Fatal(err)
 	}
@@ -131,10 +131,10 @@ func TestTablePatchMerges(t *testing.T) {
 
 func TestTablePatchUpsert(t *testing.T) {
 	db := makeTableDB(t)
-	if err := db.Table("components").Patch("new-svc", map[string]json.RawMessage{"name": json.RawMessage(`"new-svc"`)}); err != nil {
+	if err := mustTable(t, db, "components").Patch("new-svc", map[string]json.RawMessage{"name": json.RawMessage(`"new-svc"`)}); err != nil {
 		t.Fatal(err)
 	}
-	_, ok := db.Table("components").Get("new-svc")
+	_, ok := mustTable(t, db, "components").Get("new-svc")
 	if !ok {
 		t.Error("Patch on missing key should upsert")
 	}
@@ -142,10 +142,10 @@ func TestTablePatchUpsert(t *testing.T) {
 
 func TestTableDelete(t *testing.T) {
 	db := makeTableDB(t)
-	if err := db.Table("components").Delete("svc-a"); err != nil {
+	if err := mustTable(t, db, "components").Delete("svc-a"); err != nil {
 		t.Fatal(err)
 	}
-	_, ok := db.Table("components").Get("svc-a")
+	_, ok := mustTable(t, db, "components").Get("svc-a")
 	if ok {
 		t.Error("expected svc-a to be deleted")
 	}
@@ -153,7 +153,7 @@ func TestTableDelete(t *testing.T) {
 
 func TestTableAll(t *testing.T) {
 	db := makeTableDB(t)
-	all := db.Table("components").All()
+	all := mustTable(t, db, "components").All()
 	if len(all) != 2 {
 		t.Errorf("All() len=%d want 2", len(all))
 	}
@@ -172,7 +172,7 @@ func TestTableSchema(t *testing.T) {
 
 func TestTableSetPopulatesWriteBuffer(t *testing.T) {
 	db := makeTableDB(t)
-	db.Table("components").Set("svc-c", json.RawMessage(`{"name":"svc-c"}`))
+	mustTable(t, db, "components").Set("svc-c", json.RawMessage(`{"name":"svc-c"}`))
 	n := base.EngineWbufLen(db.eng)
 	op := base.EngineWbufOp(db.eng, 0)
 	if n != 1 {
@@ -201,7 +201,7 @@ func TestTableSetRequiredMissing(t *testing.T) {
 		}},
 	}}
 	db := newTableDB(cfg, nil)
-	err := db.Table("things").Set("x", json.RawMessage(`{"id":"x"}`)) // name missing
+	err := mustTable(t, db, "things").Set("x", json.RawMessage(`{"id":"x"}`)) // name missing
 	if err == nil {
 		t.Fatal("expected error for missing required column")
 	}
@@ -215,7 +215,7 @@ func TestTableSetRequiredPresent(t *testing.T) {
 		}},
 	}}
 	db := newTableDB(cfg, nil)
-	if err := db.Table("things").Set("x", json.RawMessage(`{"id":"x","name":"Xander"}`)); err != nil {
+	if err := mustTable(t, db, "things").Set("x", json.RawMessage(`{"id":"x","name":"Xander"}`)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -226,8 +226,8 @@ func TestSnapshotFieldsAreSorted(t *testing.T) {
 	cfg := base.Config{Tables: []base.TableSpec{{Name: "t", Key: "id"}}}
 	db := newTableDB(cfg, nil)
 	// Fields intentionally in reverse alphabetical order.
-	db.Table("t").Set("b", json.RawMessage(`{"z":"last","id":"b","a":"first"}`))
-	db.Table("t").Set("a", json.RawMessage(`{"z":"last","id":"a","a":"first"}`))
+	mustTable(t, db, "t").Set("b", json.RawMessage(`{"z":"last","id":"b","a":"first"}`))
+	mustTable(t, db, "t").Set("a", json.RawMessage(`{"z":"last","id":"a","a":"first"}`))
 
 	files, err := base.EngineSnapshot(db.eng)
 	if err != nil {
@@ -264,7 +264,7 @@ func TestTablePatchSkipsRequiredCheck(t *testing.T) {
 		"things": {"x": json.RawMessage(`{"id":"x","name":"old"}`)},
 	})
 	// Patch with only one field — should not fail required check
-	if err := db.Table("things").Patch("x", map[string]json.RawMessage{
+	if err := mustTable(t, db, "things").Patch("x", map[string]json.RawMessage{
 		"name": json.RawMessage(`"new"`),
 	}); err != nil {
 		t.Fatalf("Patch should not enforce required: %v", err)

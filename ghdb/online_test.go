@@ -596,7 +596,7 @@ func TestOpenOnlineReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, ok := db.(ghdb.TableDB).Table("things").Get("b")
+	v, ok := mustTableOf(t, db.(ghdb.TableDB), "things").Get("b")
 	if !ok || string(v) != `{"id":"b"}` {
 		t.Errorf("replay: got %q ok=%v", v, ok)
 	}
@@ -657,7 +657,7 @@ func TestOpenReplaysCurrentAndNextVersionsWithFilteringOrderingAndCorruption(t *
 		t.Fatalf("OpenWithClient: %v", err)
 	}
 	defer db.Close(context.Background())
-	table := db.(ghdb.TableDB).Table("things")
+	table := mustTableOf(t, db.(ghdb.TableDB), "things")
 	for _, tc := range []struct {
 		key  string
 		want string
@@ -727,7 +727,7 @@ func TestOnlineReplayAndPollSkipCorruptSegments(t *testing.T) {
 		t.Fatalf("OpenWithClientAndLogger: %v", err)
 	}
 	defer db.Close(context.Background())
-	table := db.(ghdb.TableDB).Table("things")
+	table := mustTableOf(t, db.(ghdb.TableDB), "things")
 	for _, key := range []string{"before-json-error", "between-json-errors", "after-semantic-error"} {
 		if _, ok := table.Get(key); !ok {
 			t.Errorf("startup replay did not apply valid record %q", key)
@@ -852,7 +852,7 @@ func TestOpenOnlineSegmentReplayAndPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close(context.Background())
-	table := db.(ghdb.TableDB).Table("things")
+	table := mustTableOf(t, db.(ghdb.TableDB), "things")
 	for _, key := range []string{"legacy", "rollover-one", "rollover-two"} {
 		if value, ok := table.Get(key); !ok || string(value) != `{"id":"`+key+`"}` {
 			t.Fatalf("replay %q = %q, %v; want matching record", key, value, ok)
@@ -1185,7 +1185,7 @@ func TestOpenOnlineBaselineTimeCutoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, ok := db.(ghdb.TableDB).Table("things").Get("shouldNotAppear")
+	_, ok := mustTableOf(t, db.(ghdb.TableDB), "things").Get("shouldNotAppear")
 	if ok {
 		t.Error("record before cutoff should have been skipped")
 	}
@@ -1228,7 +1228,7 @@ func setSegmentRecord(t *testing.T, db ghdb.DB, key string, padding int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.(ghdb.TableDB).Table("things").Set(key, value); err != nil {
+	if err := mustTableOf(t, db.(ghdb.TableDB), "things").Set(key, value); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1461,7 +1461,7 @@ func TestFlushOversizedMutationUsesImmutableSegment(t *testing.T) {
 	}
 	defer replayed.Close(context.Background())
 	for _, key := range []string{"large", "normal"} {
-		if _, ok := replayed.(ghdb.TableDB).Table("things").Get(key); !ok {
+		if _, ok := mustTableOf(t, replayed.(ghdb.TableDB), "things").Get(key); !ok {
 			t.Fatalf("replay missing %q", key)
 		}
 	}

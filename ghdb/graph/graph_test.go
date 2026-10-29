@@ -15,7 +15,7 @@ func TestOversizedMutationRecordRejectedBeforeGraphStateChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = db.Vertex("component").Set("svc-a", payload)
+	err = mustVertex(t, db, "component").Set("svc-a", payload)
 	var tooLarge *base.ErrMutationTooLarge
 	if !errors.As(err, &tooLarge) {
 		t.Fatalf("Vertex.Set error = %v, want ErrMutationTooLarge", err)
@@ -36,16 +36,16 @@ func TestOversizedGraphOperationsLeaveStateAndBufferUnchanged(t *testing.T) {
 	}
 	db := makeGraphDB(t)
 	// The id field must match so the oversized-value check is what rejects this.
-	assertTooLarge(t, db.Vertex("component").Set(big, json.RawMessage(`{"id":"`+big+`"}`)))
-	assertTooLarge(t, db.Vertex("component").Patch(big, map[string]json.RawMessage{}))
+	assertTooLarge(t, mustVertex(t, db, "component").Set(big, json.RawMessage(`{"id":"`+big+`"}`)))
+	assertTooLarge(t, mustVertex(t, db, "component").Patch(big, map[string]json.RawMessage{}))
 	assertTooLarge(t, db.SetEdge("dep", big, "to", json.RawMessage(`{}`)))
 	assertTooLarge(t, db.PatchEdge("dep", big, "to", map[string]json.RawMessage{}))
 	assertTooLarge(t, db.AddEdge("dep", big, "to"))
 	assertTooLarge(t, db.RemoveEdge("dep", big, "to"))
 	// Seed a cascade whose constructed delete-edge record exceeds the ceiling.
 	db.edges[big] = map[string]map[string]json.RawMessage{"svc-a": {"svc-b": nil}}
-	assertTooLarge(t, db.Vertex("component").Delete("svc-a"))
-	if _, ok := db.Vertex("component").Get("svc-a"); !ok {
+	assertTooLarge(t, mustVertex(t, db, "component").Delete("svc-a"))
+	if _, ok := mustVertex(t, db, "component").Get("svc-a"); !ok {
 		t.Fatal("vertex changed after rejected cascade")
 	}
 	if _, ok := db.GetEdge(big, "svc-a", "svc-b"); !ok {
@@ -59,10 +59,10 @@ func TestOversizedGraphOperationsLeaveStateAndBufferUnchanged(t *testing.T) {
 func TestVertexDeleteSelfLoopEmitsOneCascadeMutation(t *testing.T) {
 	db := makeGraphDB(t)
 	db.edges = map[string]map[string]map[string]json.RawMessage{"dep": {"svc-a": {"svc-a": nil}}}
-	if err := db.Vertex("component").Delete("svc-a"); err != nil {
+	if err := mustVertex(t, db, "component").Delete("svc-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := db.Vertex("component").Get("svc-a"); ok {
+	if _, ok := mustVertex(t, db, "component").Get("svc-a"); ok {
 		t.Fatal("vertex remains after delete")
 	}
 	if _, ok := db.GetEdge("dep", "svc-a", "svc-a"); ok {
@@ -125,7 +125,7 @@ func TestApplyToGraphDBValidatesMutationsAndKeepsDynamicEdgeLabels(t *testing.T)
 
 func TestVertexStoreGet(t *testing.T) {
 	db := makeGraphDB(t)
-	rec, ok := db.Vertex("component").Get("svc-a")
+	rec, ok := mustVertex(t, db, "component").Get("svc-a")
 	if !ok {
 		t.Fatal("expected svc-a")
 	}
@@ -138,10 +138,10 @@ func TestVertexStoreGet(t *testing.T) {
 
 func TestVertexStoreSet(t *testing.T) {
 	db := makeGraphDB(t)
-	if err := db.Vertex("component").Set("svc-c", json.RawMessage(`{"id":"svc-c","name":"svc-c"}`)); err != nil {
+	if err := mustVertex(t, db, "component").Set("svc-c", json.RawMessage(`{"id":"svc-c","name":"svc-c"}`)); err != nil {
 		t.Fatal(err)
 	}
-	_, ok := db.Vertex("component").Get("svc-c")
+	_, ok := mustVertex(t, db, "component").Get("svc-c")
 	if !ok {
 		t.Error("expected svc-c after Set")
 	}
@@ -149,10 +149,10 @@ func TestVertexStoreSet(t *testing.T) {
 
 func TestVertexStorePatch(t *testing.T) {
 	db := makeGraphDB(t)
-	if err := db.Vertex("component").Patch("svc-a", map[string]json.RawMessage{"version": json.RawMessage(`"9.0"`)}); err != nil {
+	if err := mustVertex(t, db, "component").Patch("svc-a", map[string]json.RawMessage{"version": json.RawMessage(`"9.0"`)}); err != nil {
 		t.Fatal(err)
 	}
-	rec, _ := db.Vertex("component").Get("svc-a")
+	rec, _ := mustVertex(t, db, "component").Get("svc-a")
 	var m map[string]string
 	json.Unmarshal(rec, &m)
 	if m["version"] != "9.0" {
@@ -165,11 +165,11 @@ func TestVertexStorePatch(t *testing.T) {
 
 func TestVertexStoreDeleteCascade(t *testing.T) {
 	db := makeGraphDB(t)
-	if err := db.Vertex("component").Delete("svc-a"); err != nil {
+	if err := mustVertex(t, db, "component").Delete("svc-a"); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, ok := db.Vertex("component").Get("svc-a"); ok {
+	if _, ok := mustVertex(t, db, "component").Get("svc-a"); ok {
 		t.Error("svc-a should be gone")
 	}
 	if len(db.edges["dep"]["svc-a"]) != 0 {
@@ -201,7 +201,7 @@ func TestVertexStoreDeleteIncomingEdgeCascade(t *testing.T) {
 	}
 	cfg := base.Config{Vertices: []base.VertexSpec{{Label: "component"}}, Edges: []base.EdgeSpec{{Label: "dep"}}}
 	db := newGraphDB(cfg, verts, edges)
-	db.Vertex("component").Delete("svc-a")
+	mustVertex(t, db, "component").Delete("svc-a")
 	if _, exists := db.edges["dep"]["svc-b"]["svc-a"]; exists {
 		t.Error("incoming edge svc-b->svc-a should be removed on svc-a delete")
 	}

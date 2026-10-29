@@ -11,7 +11,7 @@ import (
 // make a later checkpoint fail to serialize.
 func TestTableValuesAreIndependentCopies(t *testing.T) {
 	db := makeTableDB(t)
-	tbl := db.Table("components")
+	tbl := mustTable(t, db, "components")
 
 	src := json.RawMessage(`{"name":"svc-c","version":"3.0"}`)
 	if err := tbl.Set("svc-c", src); err != nil {
@@ -44,7 +44,7 @@ func TestTableValuesAreIndependentCopies(t *testing.T) {
 // map after Patch cannot rewrite the buffered mutation record.
 func TestPatchCopiesFieldsBeforeBuffering(t *testing.T) {
 	db := makeTableDB(t)
-	tbl := db.Table("components")
+	tbl := mustTable(t, db, "components")
 
 	fields := map[string]json.RawMessage{"version": json.RawMessage(`"9.9"`)}
 	if err := tbl.Patch("svc-a", fields); err != nil {
