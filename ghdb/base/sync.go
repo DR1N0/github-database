@@ -25,7 +25,11 @@ func (b *baseDB) startSync() {
 			case <-b.stopCh:
 				return
 			case <-ticker.C:
+				if b.backingOff() {
+					continue
+				}
 				if err := b.poll(context.Background()); err != nil {
+					b.noteRateLimit(err)
 					b.Logger().Printf("ghdb: sync poll failed")
 				}
 			}
@@ -49,6 +53,7 @@ func (b *baseDB) poll(ctx context.Context) error {
 	for _, vpath := range paths {
 		entries, err := b.forkGH.ListDir(ctx, b.cfg.DeltaBranch, vpath)
 		if err != nil {
+			b.noteRateLimit(err)
 			b.Logger().Printf("ghdb: poll ListDir %s failed", vpath)
 			continue
 		}
@@ -63,6 +68,7 @@ func (b *baseDB) poll(ctx context.Context) error {
 
 			data, _, err := b.forkGH.GetFile(ctx, b.cfg.DeltaBranch, key)
 			if err != nil {
+				b.noteRateLimit(err)
 				b.Logger().Printf("ghdb: poll GetFile %s (sha %s) failed", key, e.SHA)
 				continue
 			}

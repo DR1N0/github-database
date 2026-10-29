@@ -3,6 +3,7 @@ package base
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -214,6 +215,10 @@ type baseDB struct {
 	syncSHAs      map[string]string
 	syncTimes     map[string]time.Time
 	nextVerExists bool
+	// rateLimitedUntil is when an exhausted GitHub quota replenishes. While it is
+	// in the future the background workers skip their tick instead of spending
+	// requests that are certain to fail. Guarded by mu.
+	rateLimitedUntil time.Time
 
 	// Set by table/graph constructors before StartOnline is called.
 	applyFn    func(MutationRecord) error
@@ -303,6 +308,36 @@ func (b *baseDB) SetCommitterIdentity(name, email string) {
 
 func (b *baseDB) SetCommitSigner(fn func([]byte) (string, error)) {
 	b.commitSigner = fn
+}
+
+// maxRateLimitBackoff bounds how long a reported quota reset can pause the
+// background workers. A longer window is left to the caller to handle.
+const maxRateLimitBackoff = 15 * time.Minute
+
+// noteRateLimit records when an exhausted quota replenishes, so the next
+// scheduled flush or poll does not spend a request inside the closed window.
+// Errors that are not rate limits, or that carry no usable reset time, are
+// ignored: the workers then keep their normal cadence.
+func (b *baseDB) noteRateLimit(err error) {
+	var rl *github.RateLimitError
+	if !errors.As(err, &rl) || rl.ResetAt.IsZero() {
+		return
+	}
+	if wait := time.Until(rl.ResetAt); wait <= 0 || wait > maxRateLimitBackoff {
+		return
+	}
+	b.mu.Lock()
+	b.rateLimitedUntil = rl.ResetAt
+	b.mu.Unlock()
+	b.Logger().Printf("ghdb: rate limit exhausted; pausing background flush and poll until %s", rl.ResetAt.Format(time.RFC3339))
+}
+
+// backingOff reports whether the quota window is still closed.
+func (b *baseDB) backingOff() bool {
+	b.mu.RLock()
+	until := b.rateLimitedUntil
+	b.mu.RUnlock()
+	return !until.IsZero() && time.Now().Before(until)
 }
 
 func (b *baseDB) Close(ctx context.Context) error {

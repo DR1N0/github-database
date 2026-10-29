@@ -37,7 +37,11 @@ func (b *baseDB) startFlush() {
 				}
 				return
 			case <-ticker.C:
+				if b.backingOff() {
+					continue
+				}
 				if err := b.flush(context.Background()); err != nil {
+					b.noteRateLimit(err)
 					log.Printf("ghdb: flush error: %v", err)
 				}
 			}
