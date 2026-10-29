@@ -1,0 +1,8 @@
+# Keep the working tree identical across platforms: the repository stores LF and
+# gofmt (and diff review) expects LF. Without this, a Windows checkout with
+# core.autocrlf=true reports every file as unformatted.
+* text=auto eol=lf
+*.go text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf

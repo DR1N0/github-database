@@ -141,6 +141,35 @@ if err := db.Checkpoint(ctx); err != nil {
 
 Checkpoint commits a full snapshot of current state to the repository in a single atomic commit and opens a pull request to main. If `CommitSigner` is configured, the commit is GPG-signed. A checkpoint starts a new delta version.
 
+A checkpoint may succeed once per instance: after it completes, further calls return an error and the instance keeps writing to the new version until it is restarted. A checkpoint that fails — network error, rate limit, cancelled context — can be retried on the same instance; a snapshot branch left behind by the failed attempt is reused. The new version becomes the baseline only after the pull request is merged and the embedded `db_meta.json` is rebuilt, so merge the PR before redeploying.
+
+### Graph mode
+
+Set `"mode": "graph"` and declare vertices and edges. Vertices live in `vertices/<label>.json`, edges in `edges/<label>.json`.
+
+```json
+{
+  "mode": "graph",
+  "vertices": [{ "label": "service", "properties": [{ "name": "name" }] }],
+  "edges": [{ "label": "depends_on" }]
+}
+```
+
+```go
+db, err := ghdb.NewOption(sub).Token(func() string { return os.Getenv("GITHUB_TOKEN") }).OpenGraph(ctx)
+
+svc := db.Vertex("service")
+svc.Set("svc-a", json.RawMessage(`{"id":"svc-a","name":"payments"}`)) // id must equal the key
+svc.Patch("svc-a", map[string]json.RawMessage{"name": json.RawMessage(`"billing"`)})
+
+db.AddEdge("depends_on", "svc-a", "svc-b")                                  // property-less edge
+db.SetEdge("depends_on", "svc-a", "svc-b", json.RawMessage(`{"weight":2}`)) // with properties
+db.OutNeighbors("depends_on", "svc-a")
+db.OutEdges("", "svc-a") // all labels
+```
+
+Vertex values must be JSON objects whose `id` field is a string equal to the vertex id; otherwise `VertexSet.Set` returns `ghdb.ErrVertexIDMismatch`. Checkpoint writes each vertex label as a flat array, so that field is the only key available when the snapshot is loaded again — the constraint is what keeps a checkpointed graph openable. Edge labels are dynamic: mutations may introduce labels that are absent from the baseline schema.
+
 ### Online delta segments
 
 In online mode, each pod writes bounded JSONL delta segments and rolls over to a new segment when its configured byte or record cap is reached. A fixed, non-configurable 32 MiB ceiling applies to each mutation: records above normal segment limits but at or below that ceiling are stored in immutable one-record segments, while larger changes fail at the caller API with `change is too large` and leave local state unchanged. Before deploying this version, operators must restore any already-truncated delta logs from Git history or verified backups.
@@ -181,7 +210,26 @@ The example runs an HTTP server on `:8080` with endpoints:
 | `delta_branch`       | Branch (on `fork_repo`, or `base_repo` if unset) where mutation logs are written |
 | `data_repo_path`     | Override the path prefix in the repo (default: `name`) |
 | `baseline_time`      | Ignore mutations older than this timestamp             |
-| `flush_interval_sec`          | How often to flush mutations to GitHub (default: 30)       |
+| `flush_interval_sec`          | How often to flush mutations to GitHub (default: 300)      |
 | `sync_interval_sec`           | How often to poll for remote mutations (default: 30)       |
 | `max_delta_segment_bytes`     | Online delta segment byte cap (default: 786432; max: 917504) |
 | `max_delta_segment_records`   | Online delta segment record cap (default: 1000)             |
+
+## Limitations and operations
+
+- **Delta history is never pruned.** Each checkpoint starts a new version directory; older version directories stay on `delta_branch` indefinitely. A long-running instance also appends a new segment file every flush, so each version directory keeps growing. Plan storage and PR-history growth, or archive/delete old version directories yourself once the checkpoint's pull request is merged.
+- **Last write wins on timestamps.** Replay applies records in timestamp order, and each instance skips records at or before the newest timestamp it has applied. Instances need reasonably synchronized clocks; a large skew makes one instance drop another's writes.
+- **No automatic retries.** A failed GitHub request surfaces immediately; flushing and polling retry on their next interval. An exhausted quota is reported as `github.ErrRateLimited` (check with `errors.Is`) so a caller can tell "retry later" from "this will never work".
+- **Directory listings use git trees.** `ListDir` walks `GET /git/trees` instead of the contents API, so a version directory is not capped at the contents API's 1,000 entries. A listing GitHub truncates (`"truncated": true`) is reported as an error rather than silently dropping segments.
+- **API budget.** A directory listing costs one request per path level plus the listing itself (three requests for `<data_repo_path>/v<N>`), and every flush costs a listing plus one file update. Every poll lists each active version directory. Intervals are floored at 10 s to stay clear of rate limits.
+- **Checkpoint size.** Snapshots are submitted inline through the git trees API, so very large databases may exceed GitHub's payload limits.
+
+## Development
+
+```bash
+go build ./...
+go vet ./...
+go test -race -coverpkg=./... ./...
+```
+
+CI runs these commands on Linux with the race detector enabled.
