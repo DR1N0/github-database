@@ -1,6 +1,7 @@
 package base
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -45,8 +46,7 @@ func FuzzSplitMutationRecords(f *testing.F) {
 			count = 200
 		}
 		// splitMutationRecords rejects non-positive caps; keep them usable.
-		maxBytes = 200 + (maxBytes % 500)
-		maxRecords = 1 + (maxRecords % 20)
+		maxBytes, maxRecords = normalizeCaps(maxBytes, maxRecords)
 
 		recs := make([]MutationRecord, count)
 		for i := range recs {
@@ -75,4 +75,42 @@ func FuzzSplitMutationRecords(f *testing.F) {
 			t.Fatalf("segments hold %d records, want %d", total, count)
 		}
 	})
+}
+
+// normalizeCaps clamps fuzz-generated caps into the range splitMutationRecords
+// accepts. The value is reduced modulo the span first and only then made
+// positive: negating the raw int would overflow at math.MinInt, and a negative
+// remainder would push "200 + r" below zero.
+func normalizeCaps(maxBytes, maxRecords int) (int, int) {
+	return 200 + absInt(maxBytes%500), 1 + absInt(maxRecords%20)
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// TestNormalizeCapsKeepsCapsUsable pins the regression where a negative
+// remainder produced a non-positive byte cap and made the fuzz target report a
+// failure that was not a library bug.
+func TestNormalizeCapsKeepsCapsUsable(t *testing.T) {
+	for _, tc := range []struct {
+		maxBytes, maxRecords int
+	}{
+		{0, 0},
+		{-1, -1},
+		{-201, -21}, // -201 % 500 == -201, so the old code produced -1
+		{-300, -400},
+		{math.MinInt, math.MinInt},
+	} {
+		bytes, records := normalizeCaps(tc.maxBytes, tc.maxRecords)
+		if bytes < 200 || bytes > 699 {
+			t.Errorf("normalizeCaps(%d, %d) bytes = %d, want 200..699", tc.maxBytes, tc.maxRecords, bytes)
+		}
+		if records < 1 || records > 20 {
+			t.Errorf("normalizeCaps(%d, %d) records = %d, want 1..20", tc.maxBytes, tc.maxRecords, records)
+		}
+	}
 }
