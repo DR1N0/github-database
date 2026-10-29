@@ -31,10 +31,9 @@ mydb/
   "name": "mydb",
   "version": 1,
   "mode": "table",
-  "github_repo": "owner/repo",
+  "base_repo": "owner/repo",
   "delta_branch": "mydb-data",
   "data_repo_path": "relative/path/to/data",
-  "main_branch": "main",
   "flush_interval_sec": 30,
   "sync_interval_sec": 30,
   "tables": [
@@ -175,8 +174,11 @@ The example runs an HTTP server on `:8080` with endpoints:
 | `name`               | Database name (used as path prefix in the repo)        |
 | `version`            | Schema version; bump to start a new mutation log       |
 | `mode`               | `"table"` or `"graph"`                                 |
-| `github_repo`        | `"owner/repo"`                                         |
-| `delta_branch`       | Branch where mutation logs are written                 |
+| `base_repo`          | `"owner/repo"`; hosts `source_branch` and `target_branch` |
+| `fork_repo`          | Optional `"owner/repo"` with write access, used for `delta_branch` and checkpoint commits when the token can't write to `base_repo`. Must be an actual GitHub fork of `base_repo` — forks share the underlying git object store, which checkpoint relies on to build a commit in `fork_repo` on top of a tree from `base_repo`. Empty means use `base_repo` for everything. |
+| `source_branch`      | Branch (on `base_repo`) checkpoint snapshots are built from. Empty means the repo's actual default branch. |
+| `target_branch`      | PR base (on `base_repo`) for checkpoint commits. Empty means whichever branch `source_branch` resolved to. |
+| `delta_branch`       | Branch (on `fork_repo`, or `base_repo` if unset) where mutation logs are written |
 | `data_repo_path`     | Override the path prefix in the repo (default: `name`) |
 | `baseline_time`      | Ignore mutations older than this timestamp             |
 | `flush_interval_sec`          | How often to flush mutations to GitHub (default: 30)       |

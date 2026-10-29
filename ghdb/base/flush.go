@@ -13,7 +13,7 @@ import (
 )
 
 // startFlush starts the periodic write-buffer flush goroutine.
-// It must be called after b.online, b.gh, b.cfg, b.instanceID, and b.writeVer are set.
+// It must be called after b.online, b.baseGH, b.forkGH, b.cfg, b.instanceID, and b.writeVer are set.
 func (b *baseDB) startFlush() {
 	interval := time.Duration(b.cfg.FlushIntervalSec) * time.Second
 	// By default 5 minutes, and at least 10 seconds to avoid hitting GitHub API rate limits.
@@ -229,7 +229,7 @@ func (b *baseDB) flush(ctx context.Context) error {
 	}
 
 	versionPath := fmt.Sprintf("%s/v%d", GetDataRepoPath(cfg), ver)
-	entries, err := b.gh.ListDir(ctx, cfg.DeltaBranch, versionPath)
+	entries, err := b.forkGH.ListDir(ctx, cfg.DeltaBranch, versionPath)
 	if err != nil {
 		restorePending()
 		return err
@@ -249,7 +249,7 @@ func (b *baseDB) flush(ctx context.Context) error {
 	existingCount := 0
 	if activeName != "" {
 		activePath = versionPath + "/" + activeName
-		existing, sha, err = b.gh.GetFile(ctx, cfg.DeltaBranch, activePath)
+		existing, sha, err = b.forkGH.GetFile(ctx, cfg.DeltaBranch, activePath)
 		if err != nil {
 			restorePending()
 			return err
@@ -276,7 +276,7 @@ func (b *baseDB) flush(ctx context.Context) error {
 			return fmt.Errorf("ghdb: delta segment %s exceeds max bytes", path)
 		}
 		msg := fmt.Sprintf("ghdb: flush %s ver %d (%d records)", instanceID, ver, len(batch))
-		return b.gh.PutFile(ctx, cfg.DeltaBranch, path, msg, content, currentSHA)
+		return b.forkGH.PutFile(ctx, cfg.DeltaBranch, path, msg, content, currentSHA)
 	}
 
 	batch, err := recordsThatFit(pending, existing, existingCount, maxBytes, maxRecords)

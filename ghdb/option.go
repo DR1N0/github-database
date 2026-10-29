@@ -21,7 +21,8 @@ type Option struct {
 	host                 string // GitHub host; defaults to "github.com"
 	offlineFallback      bool
 	logger               *log.Logger
-	client               github.Interface // non-nil only in tests
+	baseClient           github.Interface // non-nil only in tests
+	forkClient           github.Interface // non-nil only in tests
 	committerName        string
 	committerEmail       string
 	commitSigner         func([]byte) (string, error)
@@ -94,10 +95,20 @@ func (o *Option) GitHubRequestTimeout(timeout time.Duration) *Option {
 	return o
 }
 
-// withClient injects a pre-built GitHub client, bypassing token-based construction.
-// Used exclusively in tests via export_test.go.
+// withClient injects a single pre-built GitHub client for both base_repo and
+// fork_repo roles, bypassing token-based construction. Used exclusively in
+// tests via export_test.go.
 func (o *Option) withClient(gh github.Interface) *Option {
-	o.client = gh
+	o.baseClient = gh
+	o.forkClient = gh
+	return o
+}
+
+// withClients injects distinct pre-built GitHub clients for the base_repo and
+// fork_repo roles. Used exclusively in tests via export_test.go.
+func (o *Option) withClients(base, fork github.Interface) *Option {
+	o.baseClient = base
+	o.forkClient = fork
 	return o
 }
 
@@ -155,8 +166,8 @@ func (o *Option) Open(ctx context.Context) (DB, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	gh := o.client
-	if gh == nil {
+	baseGH, forkGH := o.baseClient, o.forkClient
+	if baseGH == nil {
 		var token string
 		if o.tokenFn != nil {
 			token = o.tokenFn()
@@ -164,13 +175,17 @@ func (o *Option) Open(ctx context.Context) (DB, error) {
 		if token == "" {
 			return db, nil
 		}
-		gh = github.NewGitHubClient(cfg.GitHubRepo, token, o.host, o.githubRequestTimeout)
+		baseGH = github.NewGitHubClient(cfg.BaseRepo, token, o.host, o.githubRequestTimeout)
+		forkGH = baseGH
+		if cfg.ForkRepo != "" && cfg.ForkRepo != cfg.BaseRepo {
+			forkGH = github.NewGitHubClient(cfg.ForkRepo, token, o.host, o.githubRequestTimeout)
+		}
 	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := eng.StartOnline(ctx, gh, o.startupProgress); err != nil {
+	if err := eng.StartOnline(ctx, baseGH, forkGH, o.startupProgress); err != nil {
 		// Only the caller's context determines whether fallback is forbidden. A
 		// per-request http.Client timeout can also wrap context.DeadlineExceeded,
 		// but it is an ordinary online-startup failure while ctx remains active.

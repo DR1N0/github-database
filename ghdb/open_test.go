@@ -13,7 +13,7 @@ func testBaseline(t *testing.T) fstest.MapFS {
 	t.Helper()
 	meta, _ := json.Marshal(Config{
 		Name: "testdb", Version: 1, Mode: "table",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data",
 		Tables: []TableSpec{{Name: "things", Key: "id"}},
 	})
 	return fstest.MapFS{
@@ -72,7 +72,7 @@ func TestOpenValidDeltaSegmentConfig(t *testing.T) {
 	baseline := testBaseline(t)
 	meta, err := json.Marshal(Config{
 		Name: "testdb", Version: 1, Mode: "table",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data",
 		MaxDeltaSegmentBytes: 512_000, MaxDeltaSegmentRecords: 500,
 		Tables: []TableSpec{{Name: "things", Key: "id"}},
 	})
@@ -93,11 +93,11 @@ func TestOpenDefaultDeltaSegmentConfig(t *testing.T) {
 	}{
 		{
 			name: "missing fields",
-			meta: []byte(`{"name":"testdb","version":1,"mode":"table","github_repo":"owner/repo","delta_branch":"ghdb-data","tables":[{"name":"things","key":"id"}]}`),
+			meta: []byte(`{"name":"testdb","version":1,"mode":"table","base_repo":"owner/repo","delta_branch":"ghdb-data","tables":[{"name":"things","key":"id"}]}`),
 		},
 		{
 			name: "zero fields",
-			meta: []byte(`{"name":"testdb","version":1,"mode":"table","github_repo":"owner/repo","delta_branch":"ghdb-data","max_delta_segment_bytes":0,"max_delta_segment_records":0,"tables":[{"name":"things","key":"id"}]}`),
+			meta: []byte(`{"name":"testdb","version":1,"mode":"table","base_repo":"owner/repo","delta_branch":"ghdb-data","max_delta_segment_bytes":0,"max_delta_segment_records":0,"tables":[{"name":"things","key":"id"}]}`),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,7 +121,7 @@ func TestOpenRejectsOversizedDeltaSegmentBytes(t *testing.T) {
 	baseline := testBaseline(t)
 	meta, err := json.Marshal(Config{
 		Name: "testdb", Version: 1, Mode: "table",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data",
 		MaxDeltaSegmentBytes: 917_505,
 		Tables:               []TableSpec{{Name: "things", Key: "id"}},
 	})

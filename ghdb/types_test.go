@@ -6,8 +6,8 @@ import (
 )
 
 func TestConfigUnmarshal(t *testing.T) {
-	raw := `{"name":"mydb","version":3,"mode":"table","github_repo":"owner/repo",
-	         "delta_branch":"ghdb-data","data_repo_path":"data/mydb","main_branch":"",
+	raw := `{"name":"mydb","version":3,"mode":"table","base_repo":"owner/repo",
+	         "delta_branch":"ghdb-data","data_repo_path":"data/mydb",
 	         "flush_interval_sec":300,"sync_interval_sec":30,
 	         "tables":[{"name":"imagerepos","key":"host",
 	           "columns":[{"name":"host","required":true},{"name":"tag"}]}]}`

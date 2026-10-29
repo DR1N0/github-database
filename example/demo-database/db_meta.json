@@ -3,10 +3,9 @@
   "version": 1,
   "baseline_time": "0001-01-01T00:00:00Z",
   "mode": "table",
-  "github_repo": "DR1N0/github-database",
+  "base_repo": "DR1N0/github-database",
   "delta_branch": "ghdb-demo-database",
   "data_repo_path": "example/demo-database",
-  "main_branch": "main",
   "flush_interval_sec": 30,
   "sync_interval_sec": 30,
   "tables": [

@@ -82,6 +82,10 @@ func (f *replayTestGitHub) CreateBranch(context.Context, string, string) error {
 func (f *replayTestGitHub) DefaultBranch(context.Context) (string, string, error) {
 	return "", "", nil
 }
+func (f *replayTestGitHub) GetBranchHead(context.Context, string) (string, error) { return "", nil }
+func (f *replayTestGitHub) GetRepoInfo(context.Context) (github.RepoInfo, error) {
+	return github.RepoInfo{CanPush: true}, nil
+}
 func (f *replayTestGitHub) CreatePR(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
@@ -118,7 +122,7 @@ func TestReplayVersionAcknowledgesBadSegmentAndWatermarksSuccesses(t *testing.T)
 	var logs bytes.Buffer
 	b := &baseDB{
 		cfg:       Config{DeltaBranch: "delta"},
-		gh:        client,
+		forkGH:    client,
 		logger:    log.New(&logs, "", 0),
 		syncSHAs:  map[string]string{},
 		syncTimes: map[string]time.Time{},
@@ -168,7 +172,7 @@ func TestReplayWarningsDoNotLogMutationContents(t *testing.T) {
 	var logs bytes.Buffer
 	b := &baseDB{
 		cfg:       Config{DeltaBranch: "delta"},
-		gh:        client,
+		forkGH:    client,
 		logger:    log.New(&logs, "", 0),
 		syncSHAs:  map[string]string{},
 		syncTimes: map[string]time.Time{},
@@ -214,7 +218,7 @@ func TestPollAcknowledgesBadSegmentAndWatermarksSuccesses(t *testing.T) {
 	}
 	b := &baseDB{
 		cfg:       Config{Name: "data", Version: 1, DeltaBranch: "delta"},
-		gh:        client,
+		forkGH:    client,
 		syncSHAs:  map[string]string{},
 		syncTimes: map[string]time.Time{},
 		applyFn: func(r MutationRecord) error {

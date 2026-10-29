@@ -42,8 +42,11 @@ type Engine interface {
 	SetLogger(l *log.Logger)
 	Logger() *log.Logger
 
-	// Lifecycle — StartOnline is called once by Option.Open when credentials are present.
-	StartOnline(ctx context.Context, gh github.Interface, onProgress StartupProgressFunc) error
+	// Lifecycle — StartOnline is called once by Option.Open when credentials are
+	// present. baseGH reads BaseRepo (source tree, PR target); forkGH is used
+	// for delta_branch and checkpoint commits (same client as baseGH when no
+	// fork is configured).
+	StartOnline(ctx context.Context, baseGH, forkGH github.Interface, onProgress StartupProgressFunc) error
 	Checkpoint(ctx context.Context) error
 	Close(ctx context.Context) error
 

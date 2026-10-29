@@ -26,7 +26,7 @@ func onlineBaseline(t *testing.T) fstest.MapFS {
 	t.Helper()
 	meta, _ := json.Marshal(ghdb.Config{
 		Name: "testdb", Version: 1, Mode: "table",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data",
 		Tables: []ghdb.TableSpec{{Name: "things", Key: "id"}},
 	})
 	return fstest.MapFS{
@@ -190,7 +190,7 @@ func graphBaseline(t *testing.T) fstest.MapFS {
 	t.Helper()
 	meta, err := json.Marshal(ghdb.Config{
 		Name: "testgraph", Version: 1, Mode: "graph",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data",
 		Vertices: []ghdb.VertexSpec{{Label: "component"}},
 	})
 	if err != nil {
@@ -238,7 +238,7 @@ func onlineBaselineAtVersion(t *testing.T, version int) fstest.MapFS {
 	t.Helper()
 	meta, err := json.Marshal(ghdb.Config{
 		Name: "testdb", Version: version, Mode: "table",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data",
 		Tables: []ghdb.TableSpec{{Name: "things", Key: "id"}},
 	})
 	if err != nil {
@@ -608,7 +608,7 @@ func TestOpenReplaysCurrentAndNextVersionsWithFilteringOrderingAndCorruption(t *
 	fc, baseline := newOnlineFake(t)
 	meta, err := json.Marshal(ghdb.Config{
 		Name: "testdb", Version: 1, Mode: "table",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data", BaselineTime: cutoff,
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data", BaselineTime: cutoff,
 		Tables: []ghdb.TableSpec{{Name: "things", Key: "id"}},
 	})
 	if err != nil {
@@ -943,7 +943,7 @@ func TestPollUsesBaselineWatermarkForStartupSegments(t *testing.T) {
 	}
 	meta, err := json.Marshal(ghdb.Config{
 		Name: "testdb", Version: 1, Mode: "table",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data", BaselineTime: cutoff,
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data", BaselineTime: cutoff,
 		Tables: []ghdb.TableSpec{{Name: "things", Key: "id"}},
 	})
 	if err != nil {
@@ -1163,7 +1163,7 @@ func TestOpenOnlineBaselineTimeCutoff(t *testing.T) {
 	}
 	meta, _ := json.Marshal(ghdb.Config{
 		Name: "testdb", Version: 1, Mode: "table",
-		GitHubRepo:   "owner/repo",
+		BaseRepo:     "owner/repo",
 		DeltaBranch:  "ghdb-data",
 		BaselineTime: time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC),
 		Tables:       []ghdb.TableSpec{{Name: "things", Key: "id"}},
@@ -1196,7 +1196,7 @@ func onlineBaselineWithSegmentCaps(t *testing.T, maxBytes, maxRecords int) fstes
 	t.Helper()
 	meta, err := json.Marshal(ghdb.Config{
 		Name: "testdb", Version: 1, Mode: "table",
-		GitHubRepo: "owner/repo", DeltaBranch: "ghdb-data",
+		BaseRepo: "owner/repo", DeltaBranch: "ghdb-data",
 		MaxDeltaSegmentBytes: maxBytes, MaxDeltaSegmentRecords: maxRecords,
 		Tables: []ghdb.TableSpec{{Name: "things", Key: "id"}},
 	})

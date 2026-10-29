@@ -28,27 +28,49 @@ func NewBaseDB(cfg Config) Engine {
 // StartOnline prepares the engine for online operation, then atomically publishes
 // that state and starts workers. Call SetLogger before StartOnline so startup
 // messages use the configured logger.
-func (b *baseDB) StartOnline(ctx context.Context, gh github.Interface, onProgress StartupProgressFunc) error {
+func (b *baseDB) StartOnline(ctx context.Context, baseGH, forkGH github.Interface, onProgress StartupProgressFunc) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	b.gh = gh
+	b.baseGH = baseGH
+	b.forkGH = forkGH
 	cfg := b.cfg
 
-	_, mainSHA, err := gh.DefaultBranch(ctx)
+	_, mainSHA, err := resolveSourceBranch(ctx, baseGH, cfg)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		return fmt.Errorf("ghdb: credential validation failed: %w", err)
+		return fmt.Errorf("ghdb: read base_repo %q: %w", cfg.BaseRepo, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	b.Logger().Printf("ghdb: online mode (credential validated)")
 
+	writeRepo := cfg.ForkRepo
+	if writeRepo == "" {
+		writeRepo = cfg.BaseRepo
+	}
+	forkInfo, err := forkGH.GetRepoInfo(ctx)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("ghdb: check write access to %q: %w", writeRepo, err)
+	}
+	if !forkInfo.CanPush {
+		return fmt.Errorf("ghdb: %q is not writable by the authenticated token", writeRepo)
+	}
+	if cfg.ForkRepo != "" && cfg.ForkRepo != cfg.BaseRepo && forkInfo.ForkParent != cfg.BaseRepo {
+		return fmt.Errorf("ghdb: fork_repo %q is not a GitHub fork of base_repo %q (parent=%q)", cfg.ForkRepo, cfg.BaseRepo, forkInfo.ForkParent)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	if b.committerName == "" {
-		name, email, err := gh.GetAuthenticatedUser(ctx)
+		name, email, err := forkGH.GetAuthenticatedUser(ctx)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
@@ -70,7 +92,7 @@ func (b *baseDB) StartOnline(ctx context.Context, gh github.Interface, onProgres
 			return err
 		}
 	}
-	exists, err := gh.BranchExists(ctx, cfg.DeltaBranch)
+	exists, err := forkGH.BranchExists(ctx, cfg.DeltaBranch)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -82,7 +104,7 @@ func (b *baseDB) StartOnline(ctx context.Context, gh github.Interface, onProgres
 	}
 	b.Logger().Printf("ghdb: startup: delta branch %q exists=%t completed in %s", cfg.DeltaBranch, exists, time.Since(branchStarted))
 	if !exists {
-		if err := gh.CreateBranch(ctx, cfg.DeltaBranch, mainSHA); err != nil {
+		if err := forkGH.CreateBranch(ctx, cfg.DeltaBranch, mainSHA); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -112,7 +134,7 @@ func (b *baseDB) StartOnline(ctx context.Context, gh github.Interface, onProgres
 			return err
 		}
 	}
-	nextEntries, err := gh.ListDir(ctx, cfg.DeltaBranch, nextPath)
+	nextEntries, err := forkGH.ListDir(ctx, cfg.DeltaBranch, nextPath)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -152,9 +174,22 @@ func (b *baseDB) StartOnline(ctx context.Context, gh github.Interface, onProgres
 	return nil
 }
 
+// resolveSourceBranch returns the branch name and HEAD SHA used as the code
+// basis for startup bootstrap and checkpoint snapshots. When cfg.SourceBranch
+// is set it is resolved directly; otherwise the repo's actual default branch
+// is used.
+func resolveSourceBranch(ctx context.Context, gh github.Interface, cfg Config) (name, sha string, err error) {
+	if cfg.SourceBranch != "" {
+		sha, err := gh.GetBranchHead(ctx, cfg.SourceBranch)
+		return cfg.SourceBranch, sha, err
+	}
+	return gh.DefaultBranch(ctx)
+}
+
 type baseDB struct {
 	cfg        Config
-	gh         github.Interface
+	baseGH     github.Interface
+	forkGH     github.Interface
 	logger     *log.Logger
 	online     bool
 	instanceID string
@@ -298,7 +333,7 @@ func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath stri
 			return err
 		}
 	}
-	entries, err := b.gh.ListDir(ctx, cfg.DeltaBranch, versionPath)
+	entries, err := b.forkGH.ListDir(ctx, cfg.DeltaBranch, versionPath)
 	if err != nil {
 		return err
 	}
@@ -332,7 +367,7 @@ func (b *baseDB) replayVersion(ctx context.Context, cfg Config, versionPath stri
 			}
 		}
 		path := versionPath + "/" + e.Name
-		data, _, err := b.gh.GetFile(ctx, cfg.DeltaBranch, path)
+		data, _, err := b.forkGH.GetFile(ctx, cfg.DeltaBranch, path)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr

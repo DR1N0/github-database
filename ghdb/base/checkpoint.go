@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -45,22 +46,23 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	checkpointedAt := time.Now().UTC()
 	nextVer := b.cfg.Version + 1
 
-	mainBranch := b.cfg.MainBranch
-	if mainBranch == "" {
-		mainBranch = "main"
-	}
-	_, mainSHA, err := b.gh.DefaultBranch(ctx)
+	sourceBranch, mainSHA, err := resolveSourceBranch(ctx, b.baseGH, b.cfg)
 	if err != nil {
 		return fmt.Errorf("ghdb: checkpoint: get main SHA: %w", err)
 	}
 
-	mainTreeSHA, err := b.gh.GetCommitTree(ctx, mainSHA)
+	targetBranch := b.cfg.TargetBranch
+	if targetBranch == "" {
+		targetBranch = sourceBranch
+	}
+
+	mainTreeSHA, err := b.baseGH.GetCommitTree(ctx, mainSHA)
 	if err != nil {
 		return fmt.Errorf("ghdb: checkpoint: get main tree: %w", err)
 	}
 
 	snapshotBranch := fmt.Sprintf("ghdb-ckpt-%s-v%d", b.cfg.Name, nextVer)
-	if err := b.gh.CreateBranch(ctx, snapshotBranch, mainSHA); err != nil {
+	if err := b.forkGH.CreateBranch(ctx, snapshotBranch, mainSHA); err != nil {
 		return fmt.Errorf("ghdb: checkpoint: create snapshot branch: %w", err)
 	}
 
@@ -81,7 +83,7 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 	}
 	allFiles[prefix+"/db_meta.json"] = dbMetaContent
 
-	treeSHA, err := b.gh.CreateTree(ctx, mainTreeSHA, allFiles)
+	treeSHA, err := b.forkGH.CreateTree(ctx, mainTreeSHA, allFiles)
 	if err != nil {
 		return fmt.Errorf("ghdb: checkpoint: create tree: %w", err)
 	}
@@ -99,17 +101,24 @@ func (b *baseDB) Checkpoint(ctx context.Context) error {
 		}
 	}
 
-	commitSHA, err := b.gh.CreateCommit(ctx, treeSHA, mainSHA, message, b.committerName, b.committerEmail, ts, signature)
+	commitSHA, err := b.forkGH.CreateCommit(ctx, treeSHA, mainSHA, message, b.committerName, b.committerEmail, ts, signature)
 	if err != nil {
 		return fmt.Errorf("ghdb: checkpoint: create commit: %w", err)
 	}
 
-	if err := b.gh.UpdateRef(ctx, snapshotBranch, commitSHA); err != nil {
+	if err := b.forkGH.UpdateRef(ctx, snapshotBranch, commitSHA); err != nil {
 		return fmt.Errorf("ghdb: checkpoint: update ref: %w", err)
 	}
 
+	head := snapshotBranch
+	if b.cfg.ForkRepo != "" && b.cfg.ForkRepo != b.cfg.BaseRepo {
+		if owner, _, ok := strings.Cut(b.cfg.ForkRepo, "/"); ok {
+			head = owner + ":" + snapshotBranch
+		}
+	}
+
 	title := fmt.Sprintf("ghdb: checkpoint %s to v%d", b.cfg.Name, nextVer)
-	if _, err := b.gh.CreatePR(ctx, title, snapshotBranch, mainBranch); err != nil {
+	if _, err := b.baseGH.CreatePR(ctx, title, head, targetBranch); err != nil {
 		log.Printf("ghdb: checkpoint PR: %v", err)
 	}
 

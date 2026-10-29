@@ -255,24 +255,66 @@ func (c *httpClient) DefaultBranch(ctx context.Context) (string, string, error) 
 		}
 		return "", "", fmt.Errorf("ghdb: DefaultBranch decode: %w (response: %s)", err, snippet)
 	}
-	// Resolve branch HEAD SHA.
-	resp2, err := c.do(ctx, http.MethodGet, c.apiURL("/branches/"+repoInfo.DefaultBranch), nil)
+	sha, err := c.GetBranchHead(ctx, repoInfo.DefaultBranch)
 	if err != nil {
 		return "", "", err
 	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("ghdb: DefaultBranch resolve SHA %q: HTTP %d", repoInfo.DefaultBranch, resp2.StatusCode)
+	return repoInfo.DefaultBranch, sha, nil
+}
+
+// GetBranchHead returns the HEAD commit SHA of the named branch.
+// Returns ErrNotFound if the branch does not exist (HTTP 404).
+func (c *httpClient) GetBranchHead(ctx context.Context, branch string) (string, error) {
+	resp, err := c.do(ctx, http.MethodGet, c.apiURL("/branches/"+branch), nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ghdb: GetBranchHead %q: HTTP %d", branch, resp.StatusCode)
 	}
 	var branchInfo struct {
 		Commit struct {
 			SHA string `json:"sha"`
 		} `json:"commit"`
 	}
-	if err := json.NewDecoder(resp2.Body).Decode(&branchInfo); err != nil {
-		return "", "", err
+	if err := json.NewDecoder(resp.Body).Decode(&branchInfo); err != nil {
+		return "", err
 	}
-	return repoInfo.DefaultBranch, branchInfo.Commit.SHA, nil
+	return branchInfo.Commit.SHA, nil
+}
+
+// GetRepoInfo returns the authenticated token's push access to this repo, and
+// (if it is a GitHub fork) the repo it was forked from.
+func (c *httpClient) GetRepoInfo(ctx context.Context) (RepoInfo, error) {
+	resp, err := c.do(ctx, http.MethodGet, c.apiURL(""), nil)
+	if err != nil {
+		return RepoInfo{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return RepoInfo{}, fmt.Errorf("ghdb: GetRepoInfo: HTTP %d", resp.StatusCode)
+	}
+	var repoInfo struct {
+		Fork        bool `json:"fork"`
+		Permissions struct {
+			Push bool `json:"push"`
+		} `json:"permissions"`
+		Parent struct {
+			FullName string `json:"full_name"`
+		} `json:"parent"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&repoInfo); err != nil {
+		return RepoInfo{}, err
+	}
+	info := RepoInfo{CanPush: repoInfo.Permissions.Push}
+	if repoInfo.Fork {
+		info.ForkParent = repoInfo.Parent.FullName
+	}
+	return info, nil
 }
 
 // CreatePR opens a pull request from head into base and returns its URL.

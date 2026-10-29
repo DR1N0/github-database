@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -60,6 +61,24 @@ func TestFakeRoundTrip(t *testing.T) {
 	name, sha3, err := fc.DefaultBranch(ctx)
 	if err != nil || name == "" || sha3 == "" {
 		t.Fatalf("DefaultBranch: name=%q sha=%q err=%v", name, sha3, err)
+	}
+
+	// GetBranchHead for an existing branch
+	head, err := fc.GetBranchHead(ctx, "main")
+	if err != nil || head != "abc123" {
+		t.Fatalf("GetBranchHead(main): head=%q err=%v, want %q", head, err, "abc123")
+	}
+
+	// GetBranchHead for a branch that was never created
+	_, err = fc.GetBranchHead(ctx, "does-not-exist")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetBranchHead(does-not-exist): err=%v, want ErrNotFound", err)
+	}
+
+	// GetRepoInfo defaults to writable, non-fork
+	info, err := fc.GetRepoInfo(ctx)
+	if err != nil || !info.CanPush || info.ForkParent != "" {
+		t.Fatalf("GetRepoInfo: %+v err=%v, want CanPush=true ForkParent=\"\"", info, err)
 	}
 
 	// CreatePR

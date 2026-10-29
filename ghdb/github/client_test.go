@@ -164,6 +164,96 @@ func TestGetFileMissingSize(t *testing.T) {
 	}
 }
 
+func TestGetBranchHead(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo/branches/develop" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"commit":{"sha":"develop-sha"}}`))
+	}))
+	defer server.Close()
+
+	client := &httpClient{repo: "owner/repo", baseURL: server.URL, hc: server.Client()}
+	sha, err := client.GetBranchHead(context.Background(), "develop")
+	if err != nil || sha != "develop-sha" {
+		t.Fatalf("GetBranchHead: sha=%q err=%v, want %q", sha, err, "develop-sha")
+	}
+}
+
+func TestGetBranchHeadNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	client := &httpClient{repo: "owner/repo", baseURL: server.URL, hc: server.Client()}
+	_, err := client.GetBranchHead(context.Background(), "missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetBranchHead(missing) err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDefaultBranchResolvesHeadSHA(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/repo":
+			_, _ = w.Write([]byte(`{"default_branch":"master"}`))
+		case "/repos/owner/repo/branches/master":
+			_, _ = w.Write([]byte(`{"commit":{"sha":"master-sha"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := &httpClient{repo: "owner/repo", baseURL: server.URL, hc: server.Client()}
+	name, sha, err := client.DefaultBranch(context.Background())
+	if err != nil || name != "master" || sha != "master-sha" {
+		t.Fatalf("DefaultBranch: name=%q sha=%q err=%v, want (%q, %q)", name, sha, err, "master", "master-sha")
+	}
+}
+
+func TestGetRepoInfoNonFork(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/owner/repo" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"fork":false,"permissions":{"push":true}}`))
+	}))
+	defer server.Close()
+
+	client := &httpClient{repo: "owner/repo", baseURL: server.URL, hc: server.Client()}
+	info, err := client.GetRepoInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetRepoInfo: %v", err)
+	}
+	if !info.CanPush || info.ForkParent != "" {
+		t.Fatalf("GetRepoInfo = %+v, want CanPush=true ForkParent=\"\"", info)
+	}
+}
+
+func TestGetRepoInfoFork(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/forkowner/repo" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"fork":true,"permissions":{"push":false},"parent":{"full_name":"upstream/repo"}}`))
+	}))
+	defer server.Close()
+
+	client := &httpClient{repo: "forkowner/repo", baseURL: server.URL, hc: server.Client()}
+	info, err := client.GetRepoInfo(context.Background())
+	if err != nil {
+		t.Fatalf("GetRepoInfo: %v", err)
+	}
+	if info.CanPush || info.ForkParent != "upstream/repo" {
+		t.Fatalf("GetRepoInfo = %+v, want CanPush=false ForkParent=%q", info, "upstream/repo")
+	}
+}
+
 func TestGetFileBlobSizeMismatch(t *testing.T) {
 	want := []byte("blob content")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -5,6 +5,14 @@ import (
 	"time"
 )
 
+// RepoInfo describes the authenticated token's standing with respect to a repo.
+type RepoInfo struct {
+	CanPush bool
+	// ForkParent is the "owner/repo" this repo was forked from, or "" if it is
+	// not a GitHub fork.
+	ForkParent string
+}
+
 // Interface is the GitHub API surface used by ghdb. Tests inject a fake.
 type Interface interface {
 	GetFile(ctx context.Context, branch, path string) (content []byte, sha string, err error)
@@ -13,6 +21,15 @@ type Interface interface {
 	BranchExists(ctx context.Context, name string) (bool, error)
 	CreateBranch(ctx context.Context, name, fromSHA string) error
 	DefaultBranch(ctx context.Context) (name string, sha string, err error)
+
+	// GetBranchHead returns the HEAD commit SHA of the named branch.
+	// Returns ErrNotFound if the branch does not exist.
+	GetBranchHead(ctx context.Context, branch string) (sha string, err error)
+
+	// GetRepoInfo returns the authenticated token's push access to this
+	// client's repo, and (if it is a GitHub fork) the repo it was forked from.
+	GetRepoInfo(ctx context.Context) (RepoInfo, error)
+
 	CreatePR(ctx context.Context, title, head, base string) (prURL string, err error)
 
 	// GetAuthenticatedUser returns the name and email of the authenticated token owner.

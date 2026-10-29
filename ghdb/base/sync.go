@@ -47,7 +47,7 @@ func (b *baseDB) poll(ctx context.Context) error {
 	}
 
 	for _, vpath := range paths {
-		entries, err := b.gh.ListDir(ctx, b.cfg.DeltaBranch, vpath)
+		entries, err := b.forkGH.ListDir(ctx, b.cfg.DeltaBranch, vpath)
 		if err != nil {
 			b.Logger().Printf("ghdb: poll ListDir %s failed", vpath)
 			continue
@@ -61,7 +61,7 @@ func (b *baseDB) poll(ctx context.Context) error {
 				continue
 			}
 
-			data, _, err := b.gh.GetFile(ctx, b.cfg.DeltaBranch, key)
+			data, _, err := b.forkGH.GetFile(ctx, b.cfg.DeltaBranch, key)
 			if err != nil {
 				b.Logger().Printf("ghdb: poll GetFile %s (sha %s) failed", key, e.SHA)
 				continue
@@ -113,7 +113,7 @@ func (b *baseDB) poll(ctx context.Context) error {
 	// Detect first appearance of v{N+1}.
 	if !nextExists {
 		nextPath := fmt.Sprintf("%s/v%d", GetDataRepoPath(b.cfg), ver+1)
-		nextEntries, _ := b.gh.ListDir(ctx, b.cfg.DeltaBranch, nextPath)
+		nextEntries, _ := b.forkGH.ListDir(ctx, b.cfg.DeltaBranch, nextPath)
 		if len(nextEntries) > 0 {
 			b.mu.Lock()
 			b.nextVerExists = true

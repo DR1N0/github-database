@@ -13,14 +13,28 @@ const (
 )
 
 type Config struct {
-	Name                   string       `json:"name"`
-	Version                int          `json:"version"`
-	BaselineTime           time.Time    `json:"baseline_time"`
-	Mode                   string       `json:"mode"`
-	GitHubRepo             string       `json:"github_repo"`
-	DeltaBranch            string       `json:"delta_branch"`
-	DataRepoPath           string       `json:"data_repo_path"`
-	MainBranch             string       `json:"main_branch"`
+	Name         string    `json:"name"`
+	Version      int       `json:"version"`
+	BaselineTime time.Time `json:"baseline_time"`
+	Mode         string    `json:"mode"`
+	// BaseRepo hosts SourceBranch (the checkpoint tree basis) and TargetBranch
+	// (the checkpoint PR's destination).
+	BaseRepo     string `json:"base_repo"`
+	DeltaBranch  string `json:"delta_branch"`
+	DataRepoPath string `json:"data_repo_path"`
+	// ForkRepo, if set, is used for delta_branch and checkpoint commits instead
+	// of BaseRepo, for tokens that can read BaseRepo but cannot write to it.
+	// It must be an actual GitHub fork of BaseRepo — forks share the underlying
+	// git object store, which is required for creating commits/trees/branches
+	// here that reference BaseRepo SHAs. Empty means use BaseRepo for everything
+	// (today's single-repo behavior).
+	ForkRepo string `json:"fork_repo,omitempty"`
+	// SourceBranch is the branch (on BaseRepo) checkpoint snapshots are built
+	// from. Empty means use the repo's actual default branch (via the GitHub API).
+	SourceBranch string `json:"source_branch,omitempty"`
+	// TargetBranch is the PR base (on BaseRepo) for checkpoint commits. Empty
+	// means use whichever branch SourceBranch resolved to.
+	TargetBranch           string       `json:"target_branch,omitempty"`
 	FlushIntervalSec       int          `json:"flush_interval_sec"`
 	SyncIntervalSec        int          `json:"sync_interval_sec"`
 	MaxDeltaSegmentBytes   int          `json:"max_delta_segment_bytes"`

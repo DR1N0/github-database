@@ -53,6 +53,8 @@ type FakeClient struct {
 	lastCommit          CommitRecord
 	AuthenticatedName   string // returned by GetAuthenticatedUser; defaults to "Test User"
 	AuthenticatedEmail  string // returned by GetAuthenticatedUser; defaults to "<EMAIL_ADDRESS>"
+	PushDenied          bool   // if true, GetRepoInfo reports CanPush=false
+	ForkParent          string // if set, GetRepoInfo reports this repo as a fork of ForkParent
 }
 
 // GetFileCallCount returns the total number of GetFile calls made so far.
@@ -229,6 +231,26 @@ func (fc *FakeClient) DefaultBranch(_ context.Context) (string, string, error) {
 		sha = "0000000000000000000000000000000000000000"
 	}
 	return name, sha, nil
+}
+
+// GetRepoInfo returns the configured PushDenied/ForkParent as a RepoInfo.
+func (fc *FakeClient) GetRepoInfo(_ context.Context) (RepoInfo, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	return RepoInfo{CanPush: !fc.PushDenied, ForkParent: fc.ForkParent}, nil
+}
+
+// GetBranchHead returns the tip SHA of the named branch, or ErrNotFound if it
+// has not been created via CreateBranch/UpdateRef.
+func (fc *FakeClient) GetBranchHead(_ context.Context, name string) (string, error) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.ensureMaps()
+	sha, ok := fc.branches[name]
+	if !ok {
+		return "", ErrNotFound
+	}
+	return sha, nil
 }
 
 // CreatePR records a synthetic pull request and returns its fake URL.

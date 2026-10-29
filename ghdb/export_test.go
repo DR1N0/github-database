@@ -29,6 +29,11 @@ var (
 	OpenWithClient = func(baseline fs.FS, gh github.Interface) (DB, error) {
 		return NewOption(baseline).withClient(gh).Open(context.Background())
 	}
+	// OpenWithClients injects distinct base_repo/fork_repo GitHub clients, bypassing
+	// token auth. For tests covering the cross-repo checkpoint flow only.
+	OpenWithClients = func(baseline fs.FS, base, fork github.Interface) (DB, error) {
+		return NewOption(baseline).withClients(base, fork).Open(context.Background())
+	}
 	OpenWithClientAndLogger = func(baseline fs.FS, gh github.Interface, logger *log.Logger) (DB, error) {
 		return NewOption(baseline).Logger(logger).withClient(gh).Open(context.Background())
 	}
