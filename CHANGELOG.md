@@ -6,6 +6,24 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-10-29
+
+### Added
+
+- Benchmarks for JSONL encoding and decoding, segmentation, merge, and flush.
+  The README lists the measured numbers.
+- CI runs on Linux and Windows for the oldest and latest supported Go versions;
+  the race detector stays on Linux.
+
+### Changed
+
+- The checkpoint lease is renewed before the tree upload and again before the
+  commit. A checkpoint that outlives its window now notices the takeover and
+  stops, instead of committing a second snapshot for the same version.
+- `FakeClient` moved to `ghdb/internal/githubtest`. It was test infrastructure
+  that happened to live in the library package; the seam for tests remains
+  `github.Interface`.
+
 ## [0.0.11] - 2026-10-29
 
 ### Added
