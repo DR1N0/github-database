@@ -138,11 +138,16 @@ func (t *table) validateSetValue(key string, value json.RawMessage) error {
 }
 
 // Get returns the raw JSON value for key, and whether it exists.
+// The returned bytes are an independent copy: mutating them cannot corrupt the
+// database, and they stay valid after later writes replace the stored value.
 func (t *table) Get(key string) (json.RawMessage, bool) {
 	t.eng.RLockData()
 	defer t.eng.RUnlockData()
 	v, ok := t.data[key]
-	return v, ok
+	if !ok {
+		return nil, false
+	}
+	return base.CloneRawMessage(v), true
 }
 
 // Set writes value under key and buffers a mutation record.
@@ -151,14 +156,17 @@ func (t *table) Set(key string, value json.RawMessage) error {
 	if err := t.validateSetValue(key, value); err != nil {
 		return err
 	}
-	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set", Table: t.spec.Name, Key: key, Value: value}
+	// Store and log an independent copy: the caller keeps ownership of value and
+	// may reuse or mutate its buffer once Set returns.
+	stored := base.CloneRawMessage(value)
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "set", Table: t.spec.Name, Key: key, Value: stored}
 	if err := t.eng.ValidateMutation(record); err != nil {
 		return err
 	}
 	t.eng.LockCkptRead()
 	defer t.eng.UnlockCkptRead()
 	t.eng.LockData()
-	t.data[key] = value
+	t.data[key] = stored
 	t.eng.UnlockData()
 	t.eng.AppendMutation(record)
 	t.eng.Logger().Printf("ghdb: set %s/%s", t.spec.Name, key)
@@ -171,14 +179,17 @@ func (t *table) Patch(key string, fields map[string]json.RawMessage) error {
 	if err := t.validateKeyField(key, fields, false); err != nil {
 		return err
 	}
-	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch", Table: t.spec.Name, Key: key, Fields: fields}
+	// Copy the caller's fields before they enter the write buffer, so later
+	// mutation of the caller's map cannot alter the buffered mutation record.
+	copiedFields := base.CloneRawMap(fields)
+	record := base.MutationRecord{TS: time.Now().UTC(), Op: "patch", Table: t.spec.Name, Key: key, Fields: copiedFields}
 	if err := t.eng.ValidateMutation(record); err != nil {
 		return err
 	}
 	t.eng.LockCkptRead()
 	defer t.eng.UnlockCkptRead()
 	t.eng.LockData()
-	merged, err := base.JSONMerge(t.data[key], fields)
+	merged, err := base.JSONMerge(t.data[key], copiedFields)
 	if err != nil {
 		t.eng.UnlockData()
 		return err
@@ -206,13 +217,14 @@ func (t *table) Delete(key string) error {
 	return nil
 }
 
-// All returns a snapshot copy of all rows in the table.
+// All returns a deep copy of all rows in the table: both the map and every
+// value are independent of database state.
 func (t *table) All() map[string]json.RawMessage {
 	t.eng.RLockData()
 	defer t.eng.RUnlockData()
 	out := make(map[string]json.RawMessage, len(t.data))
 	for k, v := range t.data {
-		out[k] = v
+		out[k] = base.CloneRawMessage(v)
 	}
 	return out
 }

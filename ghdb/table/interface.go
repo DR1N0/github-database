@@ -9,6 +9,8 @@ import (
 type TableDB interface {
 	base.DB // Mode, IsOnline, Checkpoint, Close
 	Schema() []base.TableSpec
+	// Table returns the named table, or nil when it is not declared in the
+	// schema. Compare the result against nil before calling methods on it.
 	Table(name string) Table
 }
 

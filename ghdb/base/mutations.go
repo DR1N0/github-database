@@ -116,6 +116,32 @@ func SortByTS(recs []MutationRecord) {
 	sort.Slice(recs, func(i, j int) bool { return recs[i].TS.Before(recs[j].TS) })
 }
 
+// CloneRawMessage returns an independent copy of raw. Callers that store or
+// hand out json.RawMessage values use it so a caller-owned byte slice can never
+// alias database state: mutating a value returned by Get must not corrupt the
+// in-memory tables, and mutating a value passed to Set must not do so either.
+func CloneRawMessage(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	out := make(json.RawMessage, len(raw))
+	copy(out, raw)
+	return out
+}
+
+// CloneRawMap returns a copy of m whose values are independent copies.
+// A nil map stays nil.
+func CloneRawMap(m map[string]json.RawMessage) map[string]json.RawMessage {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]json.RawMessage, len(m))
+	for k, v := range m {
+		out[k] = CloneRawMessage(v)
+	}
+	return out
+}
+
 // JSONMerge merges fields into existing (a JSON object), returning the merged object.
 func JSONMerge(existing json.RawMessage, fields map[string]json.RawMessage) (json.RawMessage, error) {
 	base := map[string]json.RawMessage{}
